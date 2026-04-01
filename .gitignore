@@ -1,0 +1,46 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+*.egg-info/
+*.egg
+dist/
+build/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Virtual environments
+.venv/
+venv/
+
+# Environment / secrets
+.env
+.env.local
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# MAD runtime artifacts
+projects/*/specs/.run_state.json
+projects/*/specs/.session_id
+projects/*/specs/.session_id.*
+projects/*/specs/.run_costs.json
+projects/*/logs/
+
+# Settings (contains user-specific model choices)
+settings.json
+/projects
+projects.json
+evolution/*.json
+evolution/*.md
+evaluations

@@ -188,8 +188,8 @@ Output EXACTLY one of:
         if fail_match:
             return False, fail_match.group(1).strip()
 
-    # If we can't parse, assume pass (don't block on verifier issues)
-    return True, ""
+    # If we can't parse the output, treat as failure — don't silently skip
+    return False, "Verifier produced no parseable PASS/FAIL output"
 
 
 def _run_full(cfg: RunConfig, rules_ctx: str, research_ctx: str, domain_ctx: str, evo_ctx: str, *, state=None) -> None:
@@ -262,6 +262,7 @@ RULES:
         # Sprint execution with retry on verification failure
         max_attempts = 3
         failure_context = ""
+        ticket_passed = False
 
         for attempt in range(1, max_attempts + 1):
             if failure_context:
@@ -285,15 +286,27 @@ RULES:
             passed, details = _verify_sprint(cfg, ticket.number, ticket.title)
             if passed:
                 log_ok(f"Ticket {ticket.number} verified — PASS")
+                ticket_passed = True
                 break
             else:
                 log_warn(f"Ticket {ticket.number} verification FAILED (attempt {attempt}/{max_attempts}): {details}")
                 failure_context = details
 
-        # Git snapshot after each ticket
+        # Git snapshot after each ticket (even failed ones, for diff visibility)
         _git_snapshot(cfg, f"ticket-{ticket.number}")
 
-        # Record progress
+        if not ticket_passed:
+            # Save progress up to this point, then stop
+            state.current_ticket = ticket.number
+            state.save(cfg)
+            from mad.runner import AgentError
+            raise AgentError(
+                f"Ticket {ticket.number} failed verification after {max_attempts} attempts. "
+                f"Last error: {failure_context}\n"
+                f"Run 'mad resume' to retry from this ticket."
+            )
+
+        # Record progress only on success
         completed.add(ticket.number)
         state.completed_tickets = sorted(completed)
         state.current_ticket = ticket.number

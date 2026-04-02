@@ -50,8 +50,8 @@ _SESSION_EXPIRED_SIGNALS = [
 
 _LIMIT_SIGNALS = [
     "rate limit", "rate_limit", "usage limit", "token limit",
-    "quota", "exceeded", "overloaded", "529", "too many requests",
-    "capacity", "context window",
+    "quota exceeded", "overloaded", "529", "too many requests",
+    "capacity", "context window", "hit your limit",
 ]
 
 
@@ -303,6 +303,16 @@ def run_agent(
         else:
             log_err(f"{role} agent failed (exit code {result.returncode}). Check log: {log_file}")
             raise AgentError(f"{role} agent failed — see {log_file}")
+
+    # ---- Check for rate limit even on exit code 0 ----
+    # A rate-limited response has 0 tokens/cost but still returns a session_id.
+    # Only flag as limit if both the text matches AND there was no real work done.
+    is_empty_response = usage.get("cost_usd", 0) == 0 and usage.get("num_turns", 0) <= 1
+    if is_empty_response and _is_limit_hit(result_text):
+        _write_log(readable_log, role, cfg, session_id, result_text, log_file,
+                    failed=True, exit_code=result.returncode)
+        log_err(f"{role} hit usage limit (exit 0 but limit message detected). Run 'mad resume' later.")
+        raise AgentLimitError(f"{role} hit usage limit — see {log_file}")
 
     # ---- Success: accumulate costs ----
     _run_costs.append({

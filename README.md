@@ -257,6 +257,7 @@ multi-agent-dev/
 │   ├── tickets.py                 # Ticket parser with dependency graph
 │   ├── costs.py                   # Per-run cost tracking
 │   ├── metrics.py                 # Cross-project metrics for evolution validation
+│   ├── discord.py                 # Discord webhook integration (live streaming)
 │   └── agents/
 │       ├── planner.py             # 4-step: rules → domain research → tech research → tickets
 │       ├── coder.py               # Per-ticket sprints with self-verification
@@ -272,10 +273,17 @@ multi-agent-dev/
 │       ├── specs/                 # Tickets, research, refinement lists, review logs, state
 │       └── logs/                  # Agent logs (JSON + human-readable .md)
 │
-└── evolution/                     # Cross-project (shared)
-    ├── learnings.md               # Master learnings file (validated over time)
-    ├── metrics.json               # Score history for trend analysis
-    └── epoch_<run_id>.md          # Per-run analysis
+├── evolution/                     # Cross-project (shared)
+│   ├── learnings.md               # Master learnings file (validated over time)
+│   ├── metrics.json               # Score history for trend analysis
+│   └── epoch_<run_id>.md          # Per-run analysis
+│
+└── webhook-icons/                 # Discord webhook agent icons (512x512)
+    ├── planner_icon.{png,svg}
+    ├── coder_icon.{png,svg}
+    ├── reviewer_icon.{png,svg}
+    ├── verifier_icon.{png,svg}
+    └── finalizer_icon.{png,svg}
 ```
 
 ## Planner Pipeline
@@ -411,18 +419,59 @@ Every agent invocation is **self-contained from files** — no session resumptio
 
 | Agent | Tools | Rationale |
 |-------|-------|-----------|
-| Planner | Read, Grep, Glob, Write, WebSearch, WebFetch | Research + write specs. No Bash needed. |
+| Planner | Read, Grep, Glob, Write, WebSearch, WebFetch, Skill | Research + write specs. Skills for specialized workflows. |
 | Coder | Read, Edit, Write, Bash, Grep, Glob | Full implementation capabilities. |
-| Verifier | Read, Bash, Grep, Glob | Build + test only. No Write/Edit. |
-| Reviewer | Read, Bash, Grep, Glob, Write | Test + write reports. Restricted from modifying project files. |
+| Verifier | Read, Bash, Grep, Glob, Skill | Build + test only. Skills for specialized checks. |
+| Reviewer | Read, Bash, Grep, Glob, Write, Skill | Test + write reports. Skills for advanced evaluation. |
 | Finalizer | Read, Write, Grep, Glob | Write README + learnings. No Bash needed. |
+
+## Skills Integration
+
+Agents with the `Skill` tool can invoke Claude Code skills at runtime. Skills are modular capability packages installed at `~/.claude/skills/` or via plugins. Claude decides whether to invoke a skill based on task relevance — no manual triggering needed.
+
+**How it works:**
+
+1. Every installed skill's metadata (name + description) is loaded into the agent's context
+2. If the agent's task matches a skill's description, it invokes the `Skill` tool automatically
+3. The full skill instructions are injected only on invocation (progressive disclosure)
+
+**Example:** If the `frontend-design` plugin is installed, the Planner will automatically invoke it when designing a web frontend — producing higher-quality UI code without any prompt changes.
+
+Skills are available to Planner, Reviewer, and Verifier. The Coder and Finalizer operate without skills to keep their tool surface minimal and focused.
+
+## Discord Webhooks
+
+MAD streams live agent output to Discord channels via webhooks, with per-agent channels and custom icons.
+
+### Setup
+
+Configure webhook URLs in `settings.json`:
+
+```json
+{
+  "webhooks": {
+    "PLANNER": "https://discord.com/api/webhooks/...",
+    "CODER": "https://discord.com/api/webhooks/...",
+    "REVIEWER": "https://discord.com/api/webhooks/...",
+    "VERIFIER": "https://discord.com/api/webhooks/...",
+    "FINALIZER": "https://discord.com/api/webhooks/..."
+  }
+}
+```
+
+When webhooks are configured, agents run with `--output-format stream-json --verbose`, and each event (tool use, assistant messages, errors) is posted to the corresponding Discord channel in real time.
+
+**Features:**
+- Rate-limited posting (30 messages/min) to stay within Discord limits
+- Automatic message chunking for long outputs (>1950 chars)
+- Agent-specific webhook icons in `webhook-icons/` (PNG + SVG, 512x512)
 
 ## Limitations
 
 - **Requires Claude Code CLI** — orchestrates `claude` commands; does not call the Anthropic API directly
 - **Long-running** — a full `mad run` can take 30 minutes to several hours depending on project complexity
 - **Token usage** — each sprint, review, and fix cycle consumes tokens; per-ticket sprints use more calls but produce better code
-- **No visual testing** — the Reviewer does static analysis and runs test suites; it cannot do browser-based visual testing (Playwright MCP support planned)
+- **No visual testing** — the Reviewer does static analysis and runs test suites; browser-based visual testing via Playwright MCP is available as a plugin but not yet integrated into the review pipeline
 - **Research accuracy** — WebSearch results are spot-checked but not guaranteed; domain research should be human-reviewed for regulated industries
 
 ## License

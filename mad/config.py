@@ -243,8 +243,8 @@ class RunConfig:
 
 
 # Tool permissions per agent role
-PLANNER_TOOLS = "Read,Grep,Glob,Write,WebSearch,WebFetch"
+PLANNER_TOOLS = "Read,Grep,Glob,Write,WebSearch,WebFetch,Skill"
 CODER_TOOLS = "Read,Edit,Write,Bash,Grep,Glob"
-REVIEWER_TOOLS = "Read,Bash,Grep,Glob,Write"
+REVIEWER_TOOLS = "Read,Bash,Grep,Glob,Write,Skill"
 FINALIZER_TOOLS = "Read,Write,Grep,Glob"
-VERIFIER_TOOLS = "Read,Bash,Grep,Glob"
+VERIFIER_TOOLS = "Read,Bash,Grep,Glob,Skill"

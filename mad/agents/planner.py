@@ -95,9 +95,10 @@ PROJECT DIRECTORY: {cfg.project_dir}
 
 YOUR TASK:
 1. Analyze the project idea and determine the best tech stack (language, framework, database, etc.)
-2. Check if a coding rules file already exists in {cfg.rules_dir}/ for the chosen language/framework
+2. Always select the latest stable version of the tech stacks, and if the latest version is not stable, or there's any report about the compatibility between the stacks with the selected versions, select the compatible versions of the stacks.
+3. Check if a coding rules file already exists in {cfg.rules_dir}/ for the chosen language/framework
    - Look for files named like: rules_<language>.md, rules_<framework>.md
-3. If NO specific rules file exists for the chosen stack, CREATE one at:
+4. If NO specific rules file exists for the chosen stack, CREATE one at:
    {cfg.rules_dir}/rules_<language>_<framework>.md
 
 The rules file must be based on these general coding principles (originally in Korean, work in English):
@@ -161,7 +162,7 @@ A project is domain-specific if it involves ANY of the following:
 - **Professional workflows**: medical diagnosis flows, legal case management, accounting standards,
   supply chain logistics, manufacturing processes
 - **Specialized APIs/integrations**: government APIs, medical coding systems (ICD-10, CPT),
-  financial market data feeds, geospatial systems
+  financial market data feeds, geospatial systems, platform-specific APIs/SDKs/Packages/Libraries, etc.
 - **Safety-critical systems**: anything where incorrect behavior could harm people, finances, or legal standing
 
 IF THE PROJECT IS NOT DOMAIN-SPECIFIC:

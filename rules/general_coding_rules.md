@@ -44,7 +44,92 @@
 
 ---
 
-## 2. Naming Conventions
+## 2. Readable & Manageable Code
+
+### Explicit over Implicit (Principle of Least Surprise)
+- No hidden side effects — if a function modifies state, its name should make that obvious
+- Avoid magic: no auto-coercion tricks, no reliance on import order, no behavior that depends on invisible naming conventions
+- Prefer explicit arguments over global/ambient state
+- Configuration should be visible, not buried in decorators or metaclasses
+
+### Guard Clauses / Early Returns
+- Handle edge cases and invalid states at the top, then proceed with the main logic un-nested
+- Reduces indentation depth and makes the "happy path" immediately visible
+
+```python
+# Bad — deeply nested
+def process(user):
+    if user is not None:
+        if user.is_active:
+            if user.has_permission:
+                return do_work(user)
+    return None
+
+# Good — guard clauses
+def process(user):
+    if user is None:
+        return None
+    if not user.is_active:
+        return None
+    if not user.has_permission:
+        return None
+    return do_work(user)
+```
+
+### Immutability by Default
+- Prefer `const`/`final`/`let` over mutable variables
+- Mutate only when there is a clear reason (performance, API contract)
+- Immutable data is easier to reason about, test, and debug
+
+```javascript
+// Bad
+let items = getItems();
+items = items.filter(i => i.active);
+items = items.map(i => i.name);
+
+// Good
+const items = getItems();
+const activeNames = items.filter(i => i.active).map(i => i.name);
+```
+
+### Pure Functions Where Possible
+- Same input → same output, no side effects
+- Isolate I/O (network, disk, DB) at the boundaries; keep core logic pure
+- Makes unit testing trivial and code easier to follow
+
+```python
+# Impure — depends on external state
+def get_discount():
+    if datetime.now().weekday() == 5:
+        return 0.2
+    return 0.0
+
+# Pure — caller provides the dependency
+def get_discount(current_weekday: int) -> float:
+    if current_weekday == 5:
+        return 0.2
+    return 0.0
+```
+
+### Readability over Cleverness
+- If a one-liner requires a comment to explain it, expand it
+- Optimize for the reader's comprehension speed, not lines-of-code count
+- Code is read 10x more than it is written — optimize for the common case
+
+```python
+# Clever but opaque
+r = [x for x in (lambda f: f(f))(lambda f: lambda n: [n] if n <= 1 else f(f)(n-1) + [n])(10) if x % 2]
+
+# Clear
+def range_list(n):
+    return list(range(1, n + 1))
+
+odd_numbers = [x for x in range_list(10) if x % 2 != 0]
+```
+
+---
+
+## 3. Naming Conventions
 
 ### General Rules
 - **Meaningful names**: `data` → `userData`
@@ -84,7 +169,7 @@
 
 ---
 
-## 3. Security Fundamentals
+## 4. Security Fundamentals
 
 ### Input Validation
 - **Never trust user input**
@@ -122,7 +207,7 @@
 
 ---
 
-## 4. Error Handling
+## 5. Error Handling
 
 ### General Rules
 - **Never silently ignore errors**
@@ -175,7 +260,7 @@ if err != nil {
 
 ---
 
-## 5. Testing
+## 6. Testing
 
 ### Test Pyramid
 1. **Unit tests (70%)**: Individual functions/methods
@@ -211,7 +296,7 @@ def test_user_creation():
 
 ---
 
-## 6. Git Commit Messages
+## 7. Git Commit Messages
 
 ### Conventional Commits
 
@@ -245,7 +330,7 @@ Closes #123
 
 ---
 
-## 7. Code Review
+## 8. Code Review
 
 ### Reviewer Checklist
 - [ ] Does the code meet the requirements?
@@ -265,7 +350,7 @@ Closes #123
 
 ---
 
-## 8. Documentation
+## 9. Documentation
 
 ### Code Comments
 - **Explain why, not what** — let the code speak for itself
@@ -287,7 +372,7 @@ Closes #123
 
 ---
 
-## 9. Dependency Management
+## 10. Dependency Management
 
 ### Version Pinning
 - Production dependencies: pin exact versions
@@ -304,7 +389,7 @@ Closes #123
 
 ---
 
-## 10. Performance
+## 11. Performance
 
 ### General Rules
 - **Measure before optimizing** (no guessing)
@@ -323,7 +408,7 @@ Closes #123
 
 ---
 
-## 11. Prohibited Practices
+## 12. Prohibited Practices
 
 ### Strictly Prohibited
 - Hardcoded secrets
@@ -342,7 +427,7 @@ Closes #123
 
 ---
 
-## 12. References
+## 13. References
 
 ### Books
 - Clean Code (Robert C. Martin)

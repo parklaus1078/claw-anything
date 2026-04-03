@@ -30,6 +30,20 @@ _FALLBACK_PLANNER_MODEL = "sonnet"
 _FALLBACK_CODER_MODEL = "sonnet"
 _FALLBACK_REVIEWER_MODEL = "sonnet"
 
+# Map Claude model names to Codex-compatible model names.
+CODEX_MODEL_MAP = {
+    "claude-opus-4-6": "gpt-5.4",
+    "claude-sonnet-4-6": "gpt-5.4-mini",
+    "claude-sonnet-4-5": "gpt-5.3-codex",
+    "claude-haiku-4-5-20251001": "gpt-5.3-codex-spark",
+    "opus": "gpt-5.4",
+    "sonnet": "gpt-5.4-mini",
+    "haiku": "gpt-5.3-codex-spark",
+}
+
+# Valid fallback backends
+VALID_FALLBACK_BACKENDS = {"codex"}
+
 
 def _settings_path() -> Path:
     return _mad_home() / "settings.json"
@@ -79,6 +93,39 @@ def get_pass_score() -> float:
         return float(settings.get("pass_score", _FALLBACK_PASS_SCORE))
     except (ValueError, TypeError):
         return _FALLBACK_PASS_SCORE
+
+
+def get_fallback_backend() -> str | None:
+    """Get the fallback backend from settings.json (e.g. 'codex'), or None if disabled."""
+    settings = load_settings()
+    backend = settings.get("fallback")
+    if backend and backend in VALID_FALLBACK_BACKENDS:
+        return backend
+    return None
+
+
+def get_webhook_url(role: str) -> str | None:
+    """Get the Discord webhook URL for an agent role, or None if not configured.
+
+    Matches the role prefix against webhook keys (e.g. role 'CODER-T1' matches key 'CODER').
+    """
+    settings = load_settings()
+    webhooks = settings.get("webhooks", {})
+    # Exact match first, then prefix match (CODER-T1 → CODER, REVIEWER-I2 → REVIEWER)
+    role_upper = role.upper()
+    if role_upper in webhooks and webhooks[role_upper]:
+        return webhooks[role_upper]
+    for key, url in webhooks.items():
+        if role_upper.startswith(key.upper()) and url:
+            return url
+    return None
+
+
+def get_webhooks_enabled() -> bool:
+    """Return True if any webhook URL is configured."""
+    settings = load_settings()
+    webhooks = settings.get("webhooks", {})
+    return any(bool(url) for url in webhooks.values())
 
 
 def get_budget() -> float:

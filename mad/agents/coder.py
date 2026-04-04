@@ -34,8 +34,26 @@ def _load_file(path) -> str:
 
 
 def _find_rules_file(cfg: RunConfig) -> str | None:
-    matches = sorted(cfg.rules_dir.glob("rules_*.md"))
-    return str(matches[0]) if matches else None
+    """Return the best-matching rules_*.md for the project idea."""
+    matches = list(cfg.rules_dir.glob("rules_*.md"))
+    if not matches:
+        return None
+    if len(matches) == 1:
+        return str(matches[0])
+
+    idea_lower = cfg.idea.lower() if cfg.idea else ""
+    if idea_lower:
+        def _score(path):
+            parts = path.stem.replace("rules_", "").split("_")
+            return sum(1 for p in parts if p and p in idea_lower)
+
+        scored = [(p, _score(p)) for p in matches]
+        best_score = max(s for _, s in scored)
+        if best_score > 0:
+            best = max((p for p, s in scored if s == best_score), key=lambda p: p.stat().st_mtime)
+            return str(best)
+
+    return str(max(matches, key=lambda p: p.stat().st_mtime))
 
 
 def _build_context(cfg: RunConfig) -> tuple[str, str, str, str]:

@@ -109,7 +109,7 @@ def format_claude_event(role: str, event: dict) -> str | None:
         msg = event.get("message", {})
         content_parts = msg.get("content", [])
         tool_result = event.get("tool_use_result", {})
-        if tool_result.get("file"):
+        if isinstance(tool_result, dict) and tool_result.get("file"):
             fpath = tool_result["file"].get("filePath", "")
             nlines = tool_result["file"].get("totalLines", "?")
             return f"**{role}** | tool result: `{fpath}` ({nlines} lines)"

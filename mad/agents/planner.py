@@ -25,10 +25,37 @@ def _load_file(path) -> str:
         return ""
 
 
-def _find_rules_file(cfg: RunConfig) -> str | None:
-    """Return the first rules_*.md file in the rules dir, or None."""
-    matches = sorted(cfg.rules_dir.glob("rules_*.md"))
-    return str(matches[0]) if matches else None
+def _find_rules_file(cfg: RunConfig, idea: str = "") -> str | None:
+    """Return the best-matching rules_*.md for the project idea.
+
+    Strategy: score each file by how many of its name parts appear in the
+    idea text (case-insensitive).  Falls back to most-recently-modified if
+    no keyword overlap is found.
+    """
+    matches = list(cfg.rules_dir.glob("rules_*.md"))
+    if not matches:
+        return None
+    if len(matches) == 1:
+        return str(matches[0])
+
+    if idea:
+        idea_lower = idea.lower()
+
+        def _score(path):
+            # Extract keywords from filename: rules_python_fastapi.md -> ["python", "fastapi"]
+            stem = path.stem  # e.g. "rules_python_fastapi"
+            parts = stem.replace("rules_", "").split("_")
+            return sum(1 for p in parts if p and p in idea_lower)
+
+        scored = [(p, _score(p)) for p in matches]
+        best_score = max(s for _, s in scored)
+        if best_score > 0:
+            # Return the highest-scoring match (tie-break by newest)
+            best = max((p for p, s in scored if s == best_score), key=lambda p: p.stat().st_mtime)
+            return str(best)
+
+    # No idea or no keyword match — return most recently modified
+    return str(max(matches, key=lambda p: p.stat().st_mtime))
 
 
 def _run_with_retry(
@@ -134,7 +161,7 @@ RULES_FILE: <path to the rules file you created or found>"""
         cwd=planner_cwd,
     )
 
-    rules_file = _find_rules_file(cfg)
+    rules_file = _find_rules_file(cfg, idea=cfg.idea)
     log_info(f"Rules file: {rules_file or 'none found'}")
 
     # ==================================================================

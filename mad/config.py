@@ -82,6 +82,19 @@ def get_default_model(role: str) -> str:
     return models.get(role, fallbacks.get(role, "sonnet"))
 
 
+# Default max iterations for review<->fix loops
+_FALLBACK_MAX_ITERATIONS = 10
+
+
+def get_max_iterations() -> int:
+    """Get the max review<->fix iterations from settings.json, or fallback to 10."""
+    settings = load_settings()
+    try:
+        return int(settings.get("max_iterations", _FALLBACK_MAX_ITERATIONS))
+    except (ValueError, TypeError):
+        return _FALLBACK_MAX_ITERATIONS
+
+
 # Default pass score: 9/10 (90%)
 _FALLBACK_PASS_SCORE = 9.0
 
@@ -135,6 +148,22 @@ def get_budget() -> float:
         return float(settings.get("budget_usd", 0))
     except (ValueError, TypeError):
         return 0.0
+
+
+def get_discord_bot_token() -> str:
+    """Get the Discord bot token from settings.json."""
+    return load_settings().get("discord_bot_token", "")
+
+
+def get_discord_command_channel_id() -> str:
+    """Get the Discord command channel ID from settings.json."""
+    return str(load_settings().get("discord_command_channel_id", ""))
+
+
+def get_language() -> str:
+    """Get the configured language for bot responses (en, ko, zh)."""
+    lang = load_settings().get("language", "en")
+    return lang if lang in ("en", "ko", "zh") else "en"
 
 
 # These are read dynamically so they reflect settings.json at import time.
@@ -242,7 +271,17 @@ class RunConfig:
         self.project_dir.mkdir(parents=True, exist_ok=True)
 
 
+    @property
+    def brainstorm_dir(self) -> Path:
+        return self.specs_dir / "brainstorm"
+
+    @property
+    def brainstorm_consensus_file(self) -> Path:
+        return self.brainstorm_dir / "consensus.md"
+
+
 # Tool permissions per agent role
+BRAINSTORM_TOOLS = "Read,Grep,Glob,Write,WebSearch,WebFetch"
 PLANNER_TOOLS = "Read,Grep,Glob,Write,WebSearch,WebFetch,Skill"
 CODER_TOOLS = "Read,Edit,Write,Bash,Grep,Glob"
 REVIEWER_TOOLS = "Read,Bash,Grep,Glob,Write,Skill"

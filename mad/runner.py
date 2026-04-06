@@ -19,7 +19,7 @@ from rich.text import Text
 
 from mad.config import CODEX_MODEL_MAP, RunConfig, get_fallback_backend, get_webhook_url, get_webhooks_enabled
 from mad.console import console, log_err, log_ok, log_phase, log_warn, _print_lock
-from mad.discord import (
+from mad.discord_webhook import (
     format_claude_event, format_codex_event, format_prompt,
     post_message, post_message_async,
 )

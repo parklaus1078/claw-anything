@@ -33,6 +33,7 @@ from mad.config import (
     _mad_home,
     get_budget,
     get_default_model,
+    get_max_iterations,
     get_pass_score,
     load_settings,
     save_settings,
@@ -71,6 +72,7 @@ def _resolve_project_args(project_dir: str | None, idea: str | None) -> tuple[st
         # Both given — register/update project, derive slug from dir name
         name = Path(project_dir).resolve().name
         entry = register_project(name, str(Path(project_dir).resolve()), idea)
+        set_active_project(entry["slug"])
         return str(Path(project_dir).resolve()), idea, entry["slug"]
 
     if active:
@@ -90,7 +92,7 @@ def _resolve_project_args(project_dir: str | None, idea: str | None) -> tuple[st
 def _make_cfg(
     project_dir: str,
     idea: str,
-    max_iterations: int = 10,
+    max_iterations: int | None = None,
     planner_model: str = "",
     coder_model: str = "",
     reviewer_model: str = "",
@@ -102,7 +104,7 @@ def _make_cfg(
     cfg = RunConfig(
         project_dir=p,
         idea=idea,
-        max_iterations=max_iterations,
+        max_iterations=max_iterations if max_iterations is not None else get_max_iterations(),
         planner_model=planner_model or get_default_model("planner"),
         coder_model=coder_model or get_default_model("coder"),
         reviewer_model=reviewer_model or get_default_model("reviewer"),
@@ -280,25 +282,39 @@ def _handle_agent_error(e: AgentLimitError | AgentError, state: RunState, cfg: R
 # Core pipeline logic (shared between `run` and `resume`)
 # ===========================================================================
 
-def _run_pipeline(cfg: RunConfig, state: RunState, *, skip_plan: bool = False, skip_code: bool = False) -> None:
+def _run_pipeline(cfg: RunConfig, state: RunState, *, skip_plan: bool = False, skip_code: bool = False,
+                   brainstorm: bool = False) -> None:
     """Execute the pipeline from wherever state says we left off."""
-    from mad.agents import run_coder, run_evolution, run_finalizer, run_planner, run_reviewer
+    from mad.agents import run_brainstorm, run_coder, run_evolution, run_finalizer, run_planner, run_reviewer
+    from mad.summary import PhaseTimer, post_phase_summary
 
     try:
+        # Phase 0 (optional): Brainstorm
+        if brainstorm and state.phase not in ("brainstorm", "plan", "code", "review", "fix", "finalize", "evolution"):
+            phase_banner(0, "BRAINSTORM", "Multi-persona debate on project approach")
+            with PhaseTimer("brainstorm") as bs_pt:
+                run_brainstorm(cfg)
+            bs_pt.summary(outcome="Brainstorm consensus generated")
+            state.mark(cfg, phase="brainstorm")
+
         # Phase 1: Plan
         if not skip_plan and state.phase not in ("plan", "code", "review", "fix", "finalize", "evolution"):
             phase_banner(1, "PLANNING", "Analyzing idea -> Coding rules -> Tickets")
-            run_planner(cfg)
+            with PhaseTimer("plan_tickets") as pt:
+                run_planner(cfg)
             if not cfg.tickets_file.exists():
                 log_err("Planning failed — no tickets produced. Aborting.")
                 raise SystemExit(1)
             log_ok("Planning complete. Tickets ready.")
+            pt.summary(outcome="Planning complete — tickets generated")
             state.mark(cfg, phase="plan")
 
         # Phase 2: Code (initial)
         if not skip_code and state.phase not in ("code", "review", "fix", "finalize", "evolution"):
             phase_banner(2, "CODING", "Implementing all tickets")
-            run_coder(cfg, mode="full", state=state)
+            with PhaseTimer("code_full") as pt:
+                run_coder(cfg, mode="full", state=state)
+            pt.summary(outcome="Initial implementation complete")
             state.mark(cfg, phase="code", iteration=0)
 
         # Phase 3: Review <-> Fix loop
@@ -323,7 +339,16 @@ def _run_pipeline(cfg: RunConfig, state: RunState, *, skip_plan: bool = False, s
             last_score_data = {}
             while iteration <= cfg.max_iterations:
                 log_info(f"Review iteration {iteration} of {cfg.max_iterations}")
-                review_approved, last_score_data = run_reviewer(cfg, iteration=iteration)
+                with PhaseTimer("review") as review_pt:
+                    review_approved, last_score_data = run_reviewer(cfg, iteration=iteration)
+                score = last_score_data.get("overall_score")
+                review_pt.summary(
+                    iteration=iteration,
+                    score=score,
+                    approved=review_approved,
+                    issues_critical=last_score_data.get("critical_count", 0),
+                    issues_major=last_score_data.get("major_count", 0),
+                )
                 if review_approved:
                     approved = True
                     state.mark(cfg, phase="review", iteration=iteration, approved=True)
@@ -332,7 +357,9 @@ def _run_pipeline(cfg: RunConfig, state: RunState, *, skip_plan: bool = False, s
 
                 if iteration < cfg.max_iterations:
                     log_info("Running coder in fix mode...")
-                    run_coder(cfg, mode="fix")
+                    with PhaseTimer("code_fix") as fix_pt:
+                        run_coder(cfg, mode="fix")
+                    fix_pt.summary(outcome=f"Fix cycle {iteration} complete")
                     state.mark(cfg, phase="fix", iteration=iteration)
                 else:
                     log_warn(f"Max iterations ({cfg.max_iterations}) reached.")
@@ -359,10 +386,14 @@ def _run_pipeline(cfg: RunConfig, state: RunState, *, skip_plan: bool = False, s
         # Phase 4: Finalize
         if state.phase != "evolution":
             phase_banner(4, "FINALIZE", "README.md + Evolution learnings")
-            run_finalizer(cfg)
+            with PhaseTimer("finalize") as fin_pt:
+                run_finalizer(cfg)
+            fin_pt.summary(outcome="README.md generated")
             state.mark(cfg, phase="finalize")
 
-        run_evolution(cfg, total_iterations=iteration)
+        with PhaseTimer("evolution") as evo_pt:
+            run_evolution(cfg, total_iterations=iteration)
+        evo_pt.summary(outcome="Learnings captured")
         state.mark(cfg, phase="evolution", finished=True)
 
         # Save costs
@@ -404,25 +435,144 @@ def cli():
 
 
 # ===========================================================================
+# mad init — initialize settings.json with documented template
+# ===========================================================================
+
+# The template uses a comment-like pattern: keys ending with "_comment" are
+# plain documentation strings that sit next to the real keys.  We strip them
+# after the user has seen the file, or they can delete them manually — JSON
+# doesn't support comments, so we write a clean file with descriptive values.
+
+_SETTINGS_TEMPLATE: dict = {
+    "models": {
+        "planner": "sonnet",
+        "coder": "sonnet",
+        "reviewer": "sonnet",
+    },
+    "pass_score": 9.0,
+    "max_iterations": 10,
+    "budget_usd": 0,
+    "language": "en",
+    "fallback": "",
+    "webhooks": {
+        "PLANNER": "",
+        "CODER": "",
+        "REVIEWER": "",
+        "VERIFIER": "",
+        "FINALIZER": "",
+        "SUMMARY": "",
+    },
+    "discord_bot_token": "",
+    "discord_command_channel_id": "",
+    "agent_overrides": {},
+}
+
+_SETTINGS_GUIDE = """\
+# MAD Settings Guide
+#
+# This file was generated by `mad init`. Edit the values below.
+# JSON does not support comments — this guide is printed for reference only.
+#
+# models.planner / coder / reviewer
+#   Model for each agent role.
+#   Options: opus, sonnet, haiku, claude-opus-4-6, claude-sonnet-4-6,
+#            claude-sonnet-4-5, claude-haiku-4-5-20251001
+#
+# pass_score          (float, 0-10)  Review score threshold to auto-approve. Default: 9.0
+# max_iterations      (int, >=1)     Max review<->fix cycles. Default: 10
+# budget_usd          (float)        Per-agent-call budget in USD. 0 = unlimited.
+# language            (string)       Bot response language: "en", "ko", or "zh"
+# fallback            (string)       Fallback backend. Only "codex" is supported. "" = disabled.
+#
+# webhooks
+#   Discord webhook URLs for live agent streaming and summaries.
+#   Each key matches an agent role prefix.
+#   SUMMARY posts per-phase summaries to a dedicated channel.
+#   Leave empty ("") to disable a webhook.
+#
+# discord_bot_token           Discord bot token for the command bot (mad bot).
+# discord_command_channel_id  Channel ID where the bot listens for !mad commands.
+#
+# agent_overrides
+#   Override agent tools or descriptions without modifying source code.
+#   Example:
+#     "agent_overrides": {
+#       "CODER": { "tools": "Read,Edit,Write,Bash,Grep,Glob,WebSearch" }
+#     }
+#   Run `mad agents` to see all available agent names.
+"""
+
+
+@cli.command()
+@click.option("--force", is_flag=True, default=False, help="Overwrite existing settings.json.")
+def init(force: bool):
+    """Initialize settings.json with a documented template.
+
+    Creates a settings.json file at MAD_HOME with all available configuration
+    keys and their default values, so you know exactly what can be configured.
+    """
+    settings_path = _mad_home() / "settings.json"
+
+    if settings_path.exists() and not force:
+        log_warn(f"settings.json already exists at {settings_path}")
+        log_info("Use --force to overwrite, or edit it directly.")
+        console.print(f"\n[dim]{settings_path}[/]")
+        return
+
+    import json
+    settings_path.parent.mkdir(parents=True, exist_ok=True)
+
+    if settings_path.exists() and force:
+        # Merge: keep user values, fill in missing keys from template
+        existing = load_settings()
+        merged = dict(_SETTINGS_TEMPLATE)
+        # Deep merge for nested dicts
+        for key, value in existing.items():
+            if key in merged and isinstance(merged[key], dict) and isinstance(value, dict):
+                merged[key] = {**merged[key], **value}
+            else:
+                merged[key] = value
+        content = json.dumps(merged, indent=2) + "\n"
+    else:
+        content = json.dumps(_SETTINGS_TEMPLATE, indent=2) + "\n"
+
+    settings_path.write_text(content, encoding="utf-8")
+
+    # Write the guide as a companion file
+    guide_path = _mad_home() / "settings_guide.txt"
+    guide_path.write_text(_SETTINGS_GUIDE, encoding="utf-8")
+
+    log_ok(f"Created {settings_path}")
+    log_ok(f"Created {guide_path} (configuration reference)")
+    console.print()
+    console.print("[bold]Settings template:[/]")
+    console.print(content)
+    console.print(f"[dim]Edit {settings_path} to configure MAD.[/]")
+    console.print(f"[dim]See {guide_path} for field descriptions.[/]")
+
+
+# ===========================================================================
 # mad run — full pipeline
 # ===========================================================================
 
 @cli.command()
 @click.argument("project_dir", required=False)
 @click.argument("idea", required=False)
-@click.option("-n", "--max-iterations", default=10, show_default=True, help="Max coder<->reviewer loops.")
+@click.option("-n", "--max-iterations", default=None, type=int, help="Max coder<->reviewer loops. [default: from settings, fallback 10]")
 @click.option("--pass-score", default=None, type=float, help="Score (out of 10) to auto-approve. [default: from settings, fallback 9.0]")
 @click.option("--budget", default=None, type=float, help="Per-call budget in USD (0=unlimited). [default: from settings]")
+@click.option("--brainstorm", is_flag=True, default=False, help="Run multi-persona brainstorm before planning.")
 @_opt_model_all
 @_opt_planner_model
 @_opt_coder_model
 @_opt_reviewer_model
-def run(project_dir: str | None, idea: str | None, max_iterations: int, pass_score: float | None,
-        budget: float | None,
+def run(project_dir: str | None, idea: str | None, max_iterations: int | None, pass_score: float | None,
+        budget: float | None, brainstorm: bool,
         model_all: str | None, planner_model: str, coder_model: str, reviewer_model: str):
     """Run the full pipeline: plan -> code -> review <-> fix -> finalize.
 
     PROJECT_DIR and IDEA are optional if an active project is selected (mad select <name>).
+    Use --brainstorm to run a multi-persona debate before planning.
     """
     pd, i, slug = _resolve_project_args(project_dir, idea)
     pm, cm, rm = _resolve_models(model_all, planner_model, coder_model, reviewer_model)
@@ -436,7 +586,7 @@ def run(project_dir: str | None, idea: str | None, max_iterations: int, pass_sco
     state = RunState()
     state.save(cfg)
 
-    _run_pipeline(cfg, state)
+    _run_pipeline(cfg, state, brainstorm=brainstorm)
     update_project_status(slug, "completed" if not state.finished else "completed")
 
 
@@ -769,8 +919,9 @@ def select(name: str):
 @click.option("--reviewer", default=None, help=f"Default model for the reviewer. {_models_help}")
 @click.option("--all", "all_agents", default=None, help=f"Set the same default for all agents. {_models_help}")
 @click.option("--pass-score", default=None, type=float, help="Review pass threshold (0-10). Default: 9.0 (90%).")
+@click.option("--max-iterations", default=None, type=int, help="Max coder<->reviewer loops. Default: 10.")
 def set_model(planner: str | None, coder: str | None, reviewer: str | None,
-              all_agents: str | None, pass_score: float | None):
+              all_agents: str | None, pass_score: float | None, max_iterations: int | None):
     """Save default models and settings so you don't have to pass them every time.
 
     \b
@@ -780,8 +931,9 @@ def set_model(planner: str | None, coder: str | None, reviewer: str | None,
       mad set-model --all opus
       mad set-model --planner opus --coder sonnet --reviewer haiku
       mad set-model --pass-score 8.5
+      mad set-model --max-iterations 5
     """
-    if not any([planner, coder, reviewer, all_agents, pass_score is not None]):
+    if not any([planner, coder, reviewer, all_agents, pass_score is not None, max_iterations is not None]):
         log_err("Provide at least one of: --planner, --coder, --reviewer, --all, or --pass-score")
         raise SystemExit(1)
 
@@ -794,6 +946,11 @@ def set_model(planner: str | None, coder: str | None, reviewer: str | None,
     # Validate pass score
     if pass_score is not None and not (0.0 <= pass_score <= 10.0):
         log_err("--pass-score must be between 0 and 10.")
+        raise SystemExit(1)
+
+    # Validate max iterations
+    if max_iterations is not None and max_iterations < 1:
+        log_err("--max-iterations must be at least 1.")
         raise SystemExit(1)
 
     settings = load_settings()
@@ -814,6 +971,8 @@ def set_model(planner: str | None, coder: str | None, reviewer: str | None,
     updates: dict = {"models": models}
     if pass_score is not None:
         updates["pass_score"] = pass_score
+    if max_iterations is not None:
+        updates["max_iterations"] = max_iterations
 
     save_settings(updates)
 
@@ -826,6 +985,7 @@ def set_model(planner: str | None, coder: str | None, reviewer: str | None,
     table.add_row("Coder model", models.get("coder", get_default_model("coder")))
     table.add_row("Reviewer model", models.get("reviewer", get_default_model("reviewer")))
     table.add_row("Pass score", f"{get_pass_score()}/10")
+    table.add_row("Max iterations", str(get_max_iterations()))
     console.print(table)
     console.print(f"\n[dim]Saved to {_mad_home() / 'settings.json'}[/]")
 
@@ -854,9 +1014,62 @@ def get_model():
     score_source = "settings.json" if "pass_score" in settings else "built-in default (90%)"
     table.add_row("Pass score", f"{get_pass_score()}/10", score_source)
 
+    iter_source = "settings.json" if "max_iterations" in settings else "built-in default"
+    table.add_row("Max iterations", str(get_max_iterations()), iter_source)
+
     console.print(table)
     console.print(f"\n[dim]Settings file: {_mad_home() / 'settings.json'}[/]")
-    console.print(f"[dim]Override per-run with: mad run ... --planner-model opus --pass-score 8.5[/]")
+    console.print(f"[dim]Override per-run with: mad run ... --planner-model opus --pass-score 8.5 -n 5[/]")
+
+
+# ===========================================================================
+# mad agents — list and inspect agent definitions
+# ===========================================================================
+
+@cli.command()
+@click.argument("agent_name", required=False)
+def agents(agent_name: str | None):
+    """List all MAD agents or show details of a specific one.
+
+    \b
+    Examples:
+      mad agents              # List all agents
+      mad agents CODER        # Show details for the CODER agent
+      mad agents reviewer     # Case-insensitive lookup
+    """
+    from mad.agent_registry import get_agent, list_agents
+
+    if agent_name:
+        profile = get_agent(agent_name)
+        if not profile:
+            log_err(f"Unknown agent: '{agent_name}'. Run 'mad agents' to see all agents.")
+            raise SystemExit(1)
+        console.print()
+        console.print(f"[bold cyan]{profile.name}[/]")
+        console.print(f"  [bold]Phase:[/]       {profile.phase}")
+        console.print(f"  [bold]Role prefix:[/] {profile.role_prefix}")
+        console.print(f"  [bold]Model key:[/]   {profile.default_model_key} ({get_default_model(profile.default_model_key)})")
+        console.print(f"  [bold]Tools:[/]       {profile.tools}")
+        if profile.prompt_template:
+            console.print(f"  [bold]Prompt:[/]      {profile.prompt_template}")
+        console.print(f"  [bold]Description:[/]")
+        console.print(f"    {profile.description}")
+        return
+
+    all_agents = list_agents()
+    console.print()
+    table = Table(title="MAD Agent Registry")
+    table.add_column("Agent", style="bold cyan")
+    table.add_column("Phase", style="dim")
+    table.add_column("Model Key", style="green")
+    table.add_column("Tools")
+    table.add_column("Description", style="dim", max_width=50)
+
+    for a in all_agents:
+        table.add_row(a.name, a.phase, a.default_model_key, a.tools, a.description)
+
+    console.print(table)
+    console.print(f"\n[dim]Run 'mad agents <name>' for details. Override tools via agent_overrides in settings.json.[/]")
 
 
 # ===========================================================================
@@ -991,3 +1204,47 @@ def status():
     table.add_row("Review iterations", f"[green]{review_count}[/]" if review_count else "[dim]0[/]")
 
     console.print(table)
+
+
+# ===========================================================================
+# mad bot — start Discord command bot
+# ===========================================================================
+
+@cli.command()
+@click.option("--daemon", is_flag=True, default=False, help="Run the bot in the background.")
+def bot(daemon: bool):
+    """Start the Discord bot to receive commands and supervise agents remotely.
+
+    \b
+    Requires discord.py: pip install discord.py>=2.3
+    Configure in settings.json:
+      {
+        "discord_bot_token": "YOUR_BOT_TOKEN",
+        "discord_command_channel_id": "CHANNEL_ID"
+      }
+
+    \b
+    Pipeline:
+      !mad run <dir> "<idea>" [--brainstorm]
+      !mad resume / !mad stop
+
+    \b
+    Supervision:
+      !mad status                  Show project phase and iteration
+      !mad review-results          Show scores and refinement list
+      !mad tickets                 Show ticket list
+
+    \b
+    Directing fixes:
+      !mad fix "custom instructions"   Fix with your own feedback
+      !mad reject "what's wrong"       Reject + auto-fix
+      !mad approve                     Skip to finalization
+      !mad rerun-ticket 3              Re-implement a ticket
+
+    \b
+    Settings:
+      !mad set-language <ko|en|zh>
+      !mad help
+    """
+    from mad.discord_bot import start_bot
+    start_bot(daemon=daemon)

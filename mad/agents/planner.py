@@ -113,6 +113,15 @@ def run_planner(cfg: RunConfig) -> None:
 
     general_rules = _load_file(cfg.general_rules_file)
 
+    brainstorm_step1_ctx = ""
+    if cfg.brainstorm_consensus_file.exists():
+        brainstorm_step1_ctx = (
+            f"\nBRAINSTORM CONSENSUS (read this before choosing the tech stack):\n"
+            f"File: {cfg.brainstorm_consensus_file}\n"
+            f"(This file contains architecture decisions and tech recommendations from a multi-persona brainstorm session. "
+            f"Strongly consider the recommendations there when selecting your tech stack.)\n"
+        )
+
     rules_prompt = f"""\
 You are the PLANNER agent (Step 1/4: Tech Stack & Coding Rules).
 
@@ -120,6 +129,8 @@ PROJECT IDEA: {cfg.idea}
 PROJECT DIRECTORY: {cfg.project_dir}
 
 {evolution_block}
+
+{brainstorm_step1_ctx}
 
 YOUR TASK:
 1. Analyze the project idea and determine the best tech stack (language, framework, database, etc.)
@@ -587,6 +598,14 @@ Do NOT re-research everything — just spot-check the most critical facts."""
                 f"File: {cfg.domain_research_file}\n(Read this file in full. Domain requirements are NOT optional.)\n"
             )
 
+    brainstorm_context = ""
+    if cfg.brainstorm_consensus_file.exists():
+        brainstorm_context = (
+            f"\nBRAINSTORM CONSENSUS (multi-persona analysis of the project):\n"
+            f"File: {cfg.brainstorm_consensus_file}\n(Read this file. It contains architecture decisions, "
+            f"critical requirements, and trade-offs from a multi-perspective brainstorm session.)\n"
+        )
+
     tickets_prompt = f"""\
 You are the PLANNER agent (Step 4/4: Ticket Generation).
 
@@ -598,6 +617,8 @@ PROJECT DIRECTORY: {cfg.project_dir}
 {research_context}
 
 {domain_context}
+
+{brainstorm_context}
 
 {evolution_block}
 

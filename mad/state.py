@@ -11,7 +11,7 @@ from mad.config import RunConfig
 
 
 # Phases in execution order
-PHASES = ("plan", "code", "review", "fix", "finalize", "evolution")
+PHASES = ("brainstorm", "plan", "code", "review", "fix", "finalize", "evolution")
 
 
 @dataclass
@@ -84,6 +84,8 @@ class RunState:
             return "Run already completed."
         if not self.phase:
             return "No progress — starting from the beginning."
+        if self.phase == "brainstorm":
+            return "Brainstorm complete. Resuming from planning phase."
         if self.phase == "plan":
             return "Planning complete. Resuming from coding phase."
         if self.phase == "code":

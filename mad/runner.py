@@ -180,7 +180,8 @@ _live_active = False
 
 
 def _invoke(cmd: list[str], cwd: str, stdin_data: str = "",
-            on_line: "callable | None" = None) -> subprocess.CompletedProcess:
+            on_line: "callable | None" = None,
+            timeout_minutes: int = 0) -> subprocess.CompletedProcess:
     """Run a subprocess with a live spinner showing elapsed time.
 
     When multiple invocations run in parallel (e.g., planner steps 2+3),
@@ -191,6 +192,7 @@ def _invoke(cmd: list[str], cwd: str, stdin_data: str = "",
     Args:
         on_line: Optional callback invoked with each stdout line as it arrives.
                  Used for live Discord webhook posting.
+        timeout_minutes: Max minutes before the process is killed. 0 = no limit.
     """
     global _live_active
 
@@ -224,6 +226,7 @@ def _invoke(cmd: list[str], cwd: str, stdin_data: str = "",
 
     start = time.monotonic()
     role = _current_role or "agent"
+    timeout_secs = timeout_minutes * 60 if timeout_minutes > 0 else 0
 
     # Decide whether this call gets the spinner or falls back to periodic logs
     use_spinner = False
@@ -234,9 +237,9 @@ def _invoke(cmd: list[str], cwd: str, stdin_data: str = "",
 
     try:
         if use_spinner:
-            _run_with_spinner(proc, role, start)
+            _run_with_spinner(proc, role, start, timeout_secs=timeout_secs)
         else:
-            _run_with_periodic_log(proc, role, start)
+            _run_with_periodic_log(proc, role, start, timeout_secs=timeout_secs)
 
         # Wait for drain threads to finish
         stdout_thread.join(timeout=10)
@@ -267,7 +270,8 @@ def _invoke(cmd: list[str], cwd: str, stdin_data: str = "",
                 _live_active = False
 
 
-def _run_with_spinner(proc: subprocess.Popen, role: str, start: float) -> None:
+def _run_with_spinner(proc: subprocess.Popen, role: str, start: float,
+                      timeout_secs: int = 0) -> None:
     """Show a live animated spinner while the process runs."""
     spinner = Spinner("dots", text=Text(f" {role} running... 0s", style="dim"))
     live = Live(spinner, console=console, refresh_per_second=4, transient=True)
@@ -275,6 +279,14 @@ def _run_with_spinner(proc: subprocess.Popen, role: str, start: float) -> None:
     try:
         while proc.poll() is None:
             elapsed = int(time.monotonic() - start)
+            if timeout_secs and elapsed >= timeout_secs:
+                proc.terminate()
+                try:
+                    proc.wait(timeout=5)
+                except subprocess.TimeoutExpired:
+                    proc.kill()
+                log_warn(f"{role} killed after {elapsed // 60}m timeout")
+                return
             mins, secs = divmod(elapsed, 60)
             time_str = f"{mins}m{secs:02d}s" if mins else f"{secs}s"
             spinner.update(text=Text(f" {role} running... {time_str}", style="dim"))
@@ -283,11 +295,20 @@ def _run_with_spinner(proc: subprocess.Popen, role: str, start: float) -> None:
         live.stop()
 
 
-def _run_with_periodic_log(proc: subprocess.Popen, role: str, start: float) -> None:
+def _run_with_periodic_log(proc: subprocess.Popen, role: str, start: float,
+                           timeout_secs: int = 0) -> None:
     """Print periodic status messages when spinner is unavailable (parallel runs)."""
     last_log = 0
     while proc.poll() is None:
         elapsed = int(time.monotonic() - start)
+        if timeout_secs and elapsed >= timeout_secs:
+            proc.terminate()
+            try:
+                proc.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                proc.kill()
+            log_warn(f"{role} killed after {elapsed // 60}m timeout")
+            return
         if elapsed - last_log >= 30:  # log every 30 seconds
             mins, secs = divmod(elapsed, 60)
             time_str = f"{mins}m{secs:02d}s" if mins else f"{secs}s"
@@ -462,6 +483,7 @@ def run_agent(
     resume_session: str = "",
     log_suffix: str = "agent",
     cwd: str = "",
+    timeout_minutes: int = 0,
 ) -> str:
     """Run a claude -p invocation and return the session_id.
 
@@ -509,7 +531,8 @@ def run_agent(
 
     cmd, stdin_data = _build_cmd(prompt, tools, model, resume_session, max_budget_usd=budget,
                                   stream=use_stream)
-    result = _invoke(cmd, work_dir, stdin_data=stdin_data, on_line=on_line)
+    result = _invoke(cmd, work_dir, stdin_data=stdin_data, on_line=on_line,
+                     timeout_minutes=timeout_minutes)
     raw_output = result.stdout or result.stderr or ""
 
     # ---- Handle expired session: retry without --resume ----
@@ -520,7 +543,8 @@ def run_agent(
         )
         cmd, stdin_data = _build_cmd(prompt, tools, model, resume_session="", max_budget_usd=budget,
                                       stream=use_stream)
-        result = _invoke(cmd, work_dir, stdin_data=stdin_data, on_line=on_line)
+        result = _invoke(cmd, work_dir, stdin_data=stdin_data, on_line=on_line,
+                         timeout_minutes=timeout_minutes)
         raw_output = result.stdout or result.stderr or ""
 
     # Save raw log
@@ -606,6 +630,7 @@ def run_agent_structured(
     log_suffix: str = "agent",
     json_schema: str = "",
     cwd: str = "",
+    timeout_minutes: int = 0,
 ) -> tuple[str, dict]:
     """Run a claude -p invocation with --json-schema and return (session_id, parsed_data).
 
@@ -642,7 +667,8 @@ def run_agent_structured(
 
     cmd, stdin_data = _build_cmd(prompt, tools, model, resume_session="", json_schema=json_schema,
                                   max_budget_usd=budget, stream=use_stream)
-    result = _invoke(cmd, work_dir, stdin_data=stdin_data, on_line=on_line)
+    result = _invoke(cmd, work_dir, stdin_data=stdin_data, on_line=on_line,
+                     timeout_minutes=timeout_minutes)
     raw_output = result.stdout or result.stderr or ""
 
     log_file.write_text(raw_output, encoding="utf-8")

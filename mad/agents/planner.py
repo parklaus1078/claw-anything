@@ -65,6 +65,7 @@ def _run_with_retry(
     expected_file,
     step_name: str,
     critical: bool = False,
+    step_timeout_minutes: int = 0,
 ) -> bool:
     """Run a planner step, retrying if the expected output file is not written.
 
@@ -159,6 +160,7 @@ RULES_FILE: <path to the rules file you created or found>"""
         model=cfg.planner_model,
         log_suffix="planner_step1_rules",
         cwd=planner_cwd,
+        timeout_minutes=15,
     )
 
     rules_file = _find_rules_file(cfg, idea=cfg.idea)
@@ -341,6 +343,7 @@ RULES:
             model=cfg.planner_model,
             log_suffix="planner_step2_domain",
             cwd=planner_cwd,
+            timeout_minutes=30,
         )
 
     def _step2_domain():
@@ -368,24 +371,31 @@ You have already chosen the tech stack in Step 1. Now you MUST research official
 documentation and reliable sources BEFORE planning any tickets.
 
 YOUR TASK:
-1. Identify every major dependency the project will use:
+1. Identify the TOP 8 (maximum) most important dependencies the project will use.
+   Focus on the ones that matter most for implementation:
    - Core framework (e.g., Next.js, FastAPI, Express)
    - Database / ORM (e.g., Prisma, SQLAlchemy, Drizzle)
    - Authentication library (if needed)
    - UI library / component system (if needed)
    - Testing frameworks
    - Any third-party APIs or services mentioned in the idea
-   - Build tools, bundlers, deployment tools
+   Do NOT research transitive dependencies, build tools, or obvious standard-library modules.
 
-2. For EACH dependency, use WebSearch and WebFetch to find and read:
+2. For EACH dependency (max 8), use WebSearch and WebFetch to find and read:
    - The official documentation site (e.g., nextjs.org/docs, fastapi.tiangolo.com)
    - The official getting-started / quickstart guide
    - API reference for the specific features you'll need
    - Known gotchas, migration guides, or breaking changes in the latest version
-   - If official docs don't exist, look for well-known community resources
-     (e.g., MDN for web APIs, DigitalOcean tutorials, reputable blog posts)
+   Limit yourself to at most 3 WebSearch calls and 2 WebFetch calls per dependency.
+   If official docs don't exist, look for well-known community resources
+   (e.g., MDN for web APIs, DigitalOcean tutorials, reputable blog posts).
 
 3. Write ALL your findings to: {cfg.research_file}
+
+IMPORTANT: You MUST finish within a reasonable time. Do NOT exhaustively research
+every sub-feature. Focus on the getting-started patterns, version numbers, and
+gotchas that the coder actually needs. Once you have written the research file,
+output the line "RESEARCH_COMPLETE" and stop.
 
 The research file MUST follow this format:
 
@@ -443,7 +453,9 @@ RULES:
 - Focus on the SPECIFIC features the project needs, not a general overview
 - Include version numbers — the coder needs to know which version to install
 - Include code snippets from docs when they show the correct pattern for what we're building
-- This research will be read by the CODER and REVIEWER agents, so be thorough and specific"""
+- This research will be read by the CODER and REVIEWER agents, so be thorough and specific
+- STOP CONDITION: Once you have written the research file, output "RESEARCH_COMPLETE" and stop immediately.
+  Do NOT continue researching after writing the file. Do NOT research more than 8 dependencies."""
 
     def _step3_research_inner():
         run_agent(
@@ -454,6 +466,7 @@ RULES:
             model=cfg.planner_model,
             log_suffix="planner_step3_research",
             cwd=planner_cwd,
+            timeout_minutes=15,
         )
 
     def _step3_research():
@@ -524,6 +537,7 @@ Do NOT re-research everything — just spot-check the most critical facts."""
                 log_suffix="planner_step3_verify",
                 json_schema=verify_schema,
                 cwd=planner_cwd,
+                timeout_minutes=10,
             )
 
             checks = verify_data.get("checks", [])
@@ -683,6 +697,7 @@ Write the complete tickets file now."""
             model=cfg.planner_model,
             log_suffix="planner_step4_tickets",
             cwd=planner_cwd,
+            timeout_minutes=30,
         )
 
     _run_with_retry(

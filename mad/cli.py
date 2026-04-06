@@ -292,7 +292,7 @@ def _run_pipeline(cfg: RunConfig, state: RunState, *, skip_plan: bool = False, s
         # Phase 0 (optional): Brainstorm
         if brainstorm and state.phase not in ("brainstorm", "plan", "code", "review", "fix", "finalize", "evolution"):
             phase_banner(0, "BRAINSTORM", "Multi-persona debate on project approach")
-            with PhaseTimer("brainstorm") as bs_pt:
+            with PhaseTimer("brainstorm", cfg=cfg) as bs_pt:
                 run_brainstorm(cfg)
             bs_pt.summary(outcome="Brainstorm consensus generated")
             state.mark(cfg, phase="brainstorm")
@@ -300,7 +300,7 @@ def _run_pipeline(cfg: RunConfig, state: RunState, *, skip_plan: bool = False, s
         # Phase 1: Plan
         if not skip_plan and state.phase not in ("plan", "code", "review", "fix", "finalize", "evolution"):
             phase_banner(1, "PLANNING", "Analyzing idea -> Coding rules -> Tickets")
-            with PhaseTimer("plan_tickets") as pt:
+            with PhaseTimer("plan_tickets", cfg=cfg) as pt:
                 run_planner(cfg)
             if not cfg.tickets_file.exists():
                 log_err("Planning failed — no tickets produced. Aborting.")
@@ -312,7 +312,7 @@ def _run_pipeline(cfg: RunConfig, state: RunState, *, skip_plan: bool = False, s
         # Phase 2: Code (initial)
         if not skip_code and state.phase not in ("code", "review", "fix", "finalize", "evolution"):
             phase_banner(2, "CODING", "Implementing all tickets")
-            with PhaseTimer("code_full") as pt:
+            with PhaseTimer("code_full", cfg=cfg) as pt:
                 run_coder(cfg, mode="full", state=state)
             pt.summary(outcome="Initial implementation complete")
             state.mark(cfg, phase="code", iteration=0)
@@ -339,7 +339,7 @@ def _run_pipeline(cfg: RunConfig, state: RunState, *, skip_plan: bool = False, s
             last_score_data = {}
             while iteration <= cfg.max_iterations:
                 log_info(f"Review iteration {iteration} of {cfg.max_iterations}")
-                with PhaseTimer("review") as review_pt:
+                with PhaseTimer("review", cfg=cfg) as review_pt:
                     review_approved, last_score_data = run_reviewer(cfg, iteration=iteration)
                 score = last_score_data.get("overall_score")
                 review_pt.summary(
@@ -357,7 +357,7 @@ def _run_pipeline(cfg: RunConfig, state: RunState, *, skip_plan: bool = False, s
 
                 if iteration < cfg.max_iterations:
                     log_info("Running coder in fix mode...")
-                    with PhaseTimer("code_fix") as fix_pt:
+                    with PhaseTimer("code_fix", cfg=cfg) as fix_pt:
                         run_coder(cfg, mode="fix")
                     fix_pt.summary(outcome=f"Fix cycle {iteration} complete")
                     state.mark(cfg, phase="fix", iteration=iteration)
@@ -386,12 +386,12 @@ def _run_pipeline(cfg: RunConfig, state: RunState, *, skip_plan: bool = False, s
         # Phase 4: Finalize
         if state.phase != "evolution":
             phase_banner(4, "FINALIZE", "README.md + Evolution learnings")
-            with PhaseTimer("finalize") as fin_pt:
+            with PhaseTimer("finalize", cfg=cfg) as fin_pt:
                 run_finalizer(cfg)
             fin_pt.summary(outcome="README.md generated")
             state.mark(cfg, phase="finalize")
 
-        with PhaseTimer("evolution") as evo_pt:
+        with PhaseTimer("evolution", cfg=cfg) as evo_pt:
             run_evolution(cfg, total_iterations=iteration)
         evo_pt.summary(outcome="Learnings captured")
         state.mark(cfg, phase="evolution", finished=True)

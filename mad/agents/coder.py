@@ -133,14 +133,18 @@ The REVIEWER agent found issues that need fixing. The refinement list is at:
 Read it now, then:
 
 1. Read the documentation research file if it exists — it contains correct APIs, versions, and patterns
-2. Fix EVERY item on the refinement list, starting from the top (highest priority first)
-3. For each item:
+2. Read the tickets file header — if an **Integration Contract** exists, use it as the source of truth
+   for all API paths, ports, service names, and environment variables
+3. Fix EVERY item on the refinement list, starting from the top (highest priority first)
+4. For each item:
    a. Read the relevant file(s)
    b. Check research.md for the correct API/pattern if the fix involves a framework or library
-   c. Implement the fix
-   d. Run related tests to verify
-4. After ALL fixes are applied, run the full test suite
-5. If a fix requires changing multiple files, make all changes before moving to the next item
+   c. If the fix involves cross-component issues (API routes, CORS, ports, env vars), verify
+      consistency between frontend and backend by reading BOTH sides before making changes
+   d. Implement the fix
+   e. Run related tests to verify
+5. After ALL fixes are applied, run the full test suite
+6. If a fix requires changing multiple files, make all changes before moving to the next item
 
 RULES:
 - Do NOT add features not on the list
@@ -148,6 +152,8 @@ RULES:
 - If a fix conflicts with another item, resolve both
 - Follow the coding rules strictly
 - When fixing issues related to frameworks or libraries, consult research.md for the correct patterns
+- When fixing integration issues, ALWAYS verify both sides match (e.g., if fixing a backend route,
+  confirm the frontend calls the same path; if fixing CORS, confirm all frontend origins are listed)
 - After completing all fixes, output a summary of what you changed for each item"""
 
     ts = datetime.now().strftime("%H%M%S")
@@ -262,17 +268,27 @@ YOUR TICKET:
 
 YOUR PROCESS:
 1. Read the coding rules and research files referenced above
-2. Read any existing project files that this ticket depends on
-3. Implement everything specified in this ticket
-4. Satisfy ALL acceptance criteria
-5. Write the tests specified in the ticket
-6. Run the tests for THIS ticket to verify they pass
-7. If tests fail, debug and fix before finishing
+2. Read the tickets file header — if an **Integration Contract** section exists, read it carefully.
+   You MUST use the EXACT API paths, ports, service names, and environment variables defined there.
+3. Read any existing project files that this ticket depends on
+4. Implement everything specified in this ticket
+5. Satisfy ALL acceptance criteria
+6. Write the tests specified in the ticket
+7. Run the tests for THIS ticket to verify they pass
+8. If tests fail, debug and fix before finishing
 
 RULES:
 - Implement ONLY this ticket — do not work on other tickets
 - Follow the coding rules file strictly
 - When the ticket references documentation research, use the EXACT patterns and versions noted there
+- INTEGRATION: If this ticket involves API endpoints, proxy configs, CORS, docker-compose, or
+  environment variables, you MUST cross-reference the Integration Contract (top of tickets file)
+  and any already-implemented code to ensure consistency. Specifically:
+  - API route paths must EXACTLY match (e.g., /api/v1/users, not /api/v1/user)
+  - Frontend API calls must use the same paths the backend defines
+  - CORS origins must include all frontend origins (both Docker-internal and localhost)
+  - Docker service names in env vars must match docker-compose service names
+  - Port numbers must be consistent across docker-compose, env vars, and proxy configs
 - Write clean, production-quality code
 - Handle errors properly
 - Output a brief summary: what you implemented, what tests you ran, any issues encountered"""

@@ -782,6 +782,110 @@ RULES FOR TICKET CREATION:
       (e.g., "Korean resident registration number must be validated and encrypted at rest")
     - Do NOT defer compliance to "future work" — it must be built in from the start
 
+RULES FOR MULTI-COMPONENT PROJECTS (client + server, microservices, frontend + backend, etc.):
+11. If the project has MULTIPLE components that communicate (e.g., frontend + backend + DB),
+    you MUST add an **Integration Contract** section at the TOP of the tickets file, BEFORE Ticket 0.
+    This contract is the SINGLE SOURCE OF TRUTH for all cross-component interfaces.
+    Format:
+
+    ## Integration Contract
+
+    ### API Endpoints
+    | Method | Path | Request Body | Response Body | Auth | Component |
+    |--------|------|-------------|---------------|------|-----------|
+    | POST | /api/v1/auth/login | {{email, password}} | {{token, refreshToken}} | none | backend |
+    | GET | /api/v1/users/me | - | {{id, email, name}} | Bearer | backend |
+    (list EVERY endpoint — frontend and backend MUST use these EXACT paths)
+
+    ### Ports & Service Names
+    | Service | Port | Docker Name | Health Check |
+    |---------|------|-------------|-------------|
+    | backend | 8000 | backend | GET /health |
+    | frontend | 3000 | frontend | - |
+    | database | 5432 | db | pg_isready |
+    (these names are used in docker-compose, CORS, proxy configs, and env vars)
+
+    ### Environment Variables
+    | Variable | Used By | Example Value | Description |
+    |----------|---------|---------------|-------------|
+    | DATABASE_URL | backend | postgresql://user:pass@db:5432/mydb | DB connection |
+    | BACKEND_URL | frontend | http://backend:8000 | API proxy target |
+    (every env var that crosses component boundaries)
+
+    ### CORS Configuration
+    - Allowed origins: list every origin the backend must accept
+    - Include both Docker-internal (http://frontend:3000) and local dev (http://localhost:3000)
+
+    ### Shared Types / Schemas
+    - List any data types shared between frontend and backend (User, Auth response, etc.)
+    - These MUST be implemented identically on both sides
+
+12. EVERY ticket that implements a cross-component interface MUST reference the Integration Contract:
+    "Implement endpoints per Integration Contract: POST /api/v1/auth/login, GET /api/v1/auth/me"
+    The coder MUST read the contract and use the EXACT paths, ports, and variable names specified.
+13. Include a dedicated "Integration & Connectivity" ticket (near the end, before E2E testing)
+    that verifies all cross-component connections work:
+    - Backend CORS accepts all specified origins
+    - Frontend proxy/rewrites target the correct backend URL
+    - Docker services can reach each other by service name
+    - All env vars are set in docker-compose.yml and .env.example
+    - Health check endpoints respond correctly
+14. docker-compose.yml MUST have proper `depends_on` with health checks so services
+    start in the correct order (DB → backend → frontend).
+
+RULES FOR MINIMAL TICKET UNITS:
+15. Each ticket MUST be the SMALLEST SELF-CONTAINED unit of work. A ticket that does
+    multiple distinct things must be split. Examples:
+    Bad: "Ticket 5: CRUD API for Users" (this is 4 tickets)
+    Good: "Ticket 5: Create User (POST /api/users)", "Ticket 6: Get User (GET /api/users/:id)",
+          "Ticket 7: Update User (PUT /api/users/:id)", "Ticket 8: Delete User (DELETE /api/users/:id)"
+    Bad: "Ticket 3: Authentication — login, register, forgot password, JWT middleware"
+    Good: "Ticket 3: Register endpoint", "Ticket 4: Login endpoint", "Ticket 5: JWT middleware",
+          "Ticket 6: Forgot password flow"
+    Bad: "Ticket 2: Dashboard page with charts, tables, and filters"
+    Good: "Ticket 2: Dashboard layout and navigation", "Ticket 3: Dashboard data table",
+          "Ticket 4: Dashboard charts", "Ticket 5: Dashboard filters"
+    Each ticket = one API endpoint, one UI component/page section, one middleware, or one config step.
+    The coder implements ONE ticket per sprint in a fresh context — large tickets cause context
+    exhaustion and produce lower quality code.
+
+RULES FOR E2E-TESTABLE ACCEPTANCE CRITERIA:
+16. For any ticket involving UI pages or API endpoints, write acceptance criteria that
+    can be verified by automated browser testing (Playwright) or curl commands.
+    Bad: "The dashboard should look professional"
+    Good: "Navigating to /dashboard shows a page with a table containing columns: Name, Status, Date.
+           Clicking the 'Add' button opens a modal with fields: Name (text), Status (dropdown).
+           Submitting the form with valid data adds a new row to the table."
+    Bad: "The login should work"
+    Good: "POST /api/auth/login with {{"email": "test@test.com", "password": "password"}} returns
+           200 with {{"token": "...", "user": {{...}}}}. Navigating to /login, filling the email
+           and password fields, and clicking 'Sign In' redirects to /dashboard."
+    This is critical — the reviewer will use Playwright browser tools to test web UIs
+    and curl to test APIs. Vague criteria cannot be automatically verified.
+    NOTE: Playwright E2E testing is only applicable for web applications (frontend, backend,
+    fullstack). For CLI tools, libraries, desktop, and mobile apps, write acceptance criteria
+    that can be verified via Bash commands (run commands, check exit codes, verify output).
+
+RULES FOR E2E TEST TICKET:
+17. The last ticket before finalization must be a comprehensive **E2E Test** ticket.
+    For web applications, this ticket MUST instruct the coder to write Playwright-based
+    E2E tests that simulate real user interactions:
+    - Navigate to each page
+    - Fill forms, click buttons, select options
+    - Verify page content updates correctly
+    - Test the complete user journey (e.g., register → login → create item → view item → delete item)
+    - Check for JavaScript console errors and failed network requests
+    For non-web applications, write appropriate integration/functional tests using the project's
+    test framework or Bash scripts.
+
+RULES FOR UI/UX DESIGN:
+18. For ANY ticket involving frontend UI components, pages, or layouts, instruct the coder
+    to use the `frontend-design` skill (invoked via the Skill tool) to design the UI/UX.
+    Include in the ticket's implementation details:
+    "Use the frontend-design skill to design the UI for this component/page before implementing it.
+     The skill will produce a high-quality, cohesive design that should be followed during implementation."
+    This ensures the UI is designed with professional quality rather than ad-hoc styling.
+
 Write the complete tickets file now."""
 
     def _step4_tickets():

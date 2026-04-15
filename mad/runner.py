@@ -63,6 +63,66 @@ _LIMIT_SIGNALS = [
 ]
 
 
+# Known project-level .md files that should NOT be relocated
+_PROJECT_MD_WHITELIST = {
+    "readme.md", "changelog.md", "contributing.md", "license.md",
+    "code_of_conduct.md", "security.md", "claude.md",
+}
+
+
+def _collect_stray_logs(work_dir: Path, pre_existing: set[Path], logs_dest: Path) -> None:
+    """Move .md files created by the agent out of the work directory root into logs_dest.
+
+    Only moves files that:
+    - Are in the work directory root (not subdirectories)
+    - Did not exist before the agent ran
+    - Are not well-known project files (README.md, CHANGELOG.md, etc.)
+    """
+    if not work_dir.is_dir():
+        return
+    new_md = set(work_dir.glob("*.md")) - pre_existing
+    if not new_md:
+        return
+    for md_file in new_md:
+        if md_file.name.lower() in _PROJECT_MD_WHITELIST:
+            continue
+        logs_dest.mkdir(parents=True, exist_ok=True)
+        dest = logs_dest / md_file.name
+        # Avoid overwriting — append a suffix if needed
+        if dest.exists():
+            stem = md_file.stem
+            dest = logs_dest / f"{stem}_{int(time.time())}.md"
+        try:
+            md_file.rename(dest)
+        except OSError:
+            pass  # cross-device or permission issue — leave it
+
+
+# Injected as --append-system-prompt so Claude Code agents reliably handle large files.
+_SYSTEM_SUFFIX = (
+    "CRITICAL RULE — LARGE FILE HANDLING: "
+    "When the Read tool returns an error containing 'exceeds maximum allowed tokens', "
+    "you MUST immediately retry reading the file using `offset` and `limit` parameters "
+    "to read it in chunks (e.g., offset=0 limit=500, then offset=500 limit=500). "
+    "Alternatively, use Grep to locate the relevant lines first, then Read only that range. "
+    "NEVER skip or abandon a file because it is too large. NEVER proceed without reading it. "
+    "ALWAYS retry with chunked reads until you have the content you need."
+)
+
+# Prepended to every agent prompt for rules that must be obeyed.
+# This is more reliable than --append-system-prompt alone because the agent
+# sees it right before the task in its user message.
+_PROMPT_PREAMBLE = (
+    "[MANDATORY RULES — read before starting]\n"
+    "1. LARGE FILE HANDLING: If the Read tool returns 'exceeds maximum allowed tokens', "
+    "you MUST retry with `offset` and `limit` parameters (e.g., offset=0 limit=500). "
+    "Do NOT skip the file. Do NOT proceed without its content. "
+    "Use Grep to find relevant lines first, then Read only that range.\n"
+    "2. STAY ON TASK: Complete every step in your instructions. Do not skip steps.\n"
+    "[END MANDATORY RULES]\n\n"
+)
+
+
 def _build_cmd(prompt: str, tools: str, model: str, resume_session: str,
                json_schema: str = "", max_budget_usd: float = 0,
                stream: bool = False) -> tuple[list[str], str]:
@@ -77,6 +137,7 @@ def _build_cmd(prompt: str, tools: str, model: str, resume_session: str,
         "-p",
         "--allowedTools", tools,
         "--output-format", output_format,
+        "--append-system-prompt", _SYSTEM_SUFFIX,
     ]
     if stream:
         cmd.append("--verbose")
@@ -317,14 +378,35 @@ def _run_with_periodic_log(proc: subprocess.Popen, role: str, start: float,
         time.sleep(1)
 
 
+def _extract_token_usage(data: dict) -> dict:
+    """Extract token counts from a Claude CLI response's usage field.
+
+    Claude's API reports input_tokens as *non-cached* input only.
+    Total input = input_tokens + cache_creation_input_tokens + cache_read_input_tokens.
+    """
+    u = data.get("usage", {})
+    raw_input = u.get("input_tokens", 0) or 0
+    cache_read = u.get("cache_read_input_tokens", 0) or 0
+    cache_creation = u.get("cache_creation_input_tokens", 0) or 0
+    output = u.get("output_tokens", 0) or 0
+    return {
+        "input_tokens": raw_input + cache_read + cache_creation,
+        "output_tokens": output,
+        "cache_read_tokens": cache_read,
+        "cache_creation_tokens": cache_creation,
+    }
+
+
 def _parse(raw: str) -> tuple[str, str, dict]:
     """Parse JSON output, return (session_id, result_text, usage_info)."""
     try:
         data = json.loads(raw)
+        tokens = _extract_token_usage(data)
         usage = {
             "cost_usd": data.get("total_cost_usd", 0) or 0,
             "duration_ms": data.get("total_duration_ms", 0) or 0,
             "num_turns": data.get("num_turns", 0) or 0,
+            **tokens,
         }
         return data.get("session_id", ""), data.get("result", ""), usage
     except (json.JSONDecodeError, TypeError):
@@ -356,10 +438,12 @@ def _parse_stream_json(raw: str) -> tuple[str, str, dict]:
         elif etype == "result":
             session_id = event.get("session_id", session_id)
             result_text = event.get("result", "")
+            tokens = _extract_token_usage(event)
             usage = {
                 "cost_usd": event.get("total_cost_usd", 0) or 0,
                 "duration_ms": event.get("duration_ms", 0) or 0,
                 "num_turns": event.get("num_turns", 0) or 0,
+                **tokens,
             }
 
     return session_id, result_text, usage
@@ -501,9 +585,15 @@ def run_agent(
         AgentLimitError: if the failure looks like a usage limit hit.
         AgentError: for all other failures.
     """
+    prompt = _PROMPT_PREAMBLE + prompt
     log_file = cfg.logs_dir / f"{cfg.run_id}_{log_suffix}.json"
     readable_log = cfg.logs_dir / f"{cfg.run_id}_{log_suffix}.md"
     work_dir = cwd or str(cfg.project_dir)
+
+    # Snapshot existing .md files in the work dir before the agent runs,
+    # so we can relocate any stray logs it creates afterwards.
+    work_dir_path = Path(work_dir)
+    pre_existing_md = set(work_dir_path.glob("*.md")) if work_dir_path.is_dir() else set()
 
     global _current_role
     model_label = f" (model: {model})" if model else ""
@@ -612,11 +702,19 @@ def run_agent(
         "cost_usd": usage.get("cost_usd", 0),
         "duration_ms": usage.get("duration_ms", 0),
         "num_turns": usage.get("num_turns", 0),
+        "input_tokens": usage.get("input_tokens", 0),
+        "output_tokens": usage.get("output_tokens", 0),
+        "cache_read_tokens": usage.get("cache_read_tokens", 0),
+        "cache_creation_tokens": usage.get("cache_creation_tokens", 0),
         "timestamp": datetime.now().isoformat(),
     })
 
     _write_log(readable_log, role, cfg, session_id, result_text, log_file)
     log_ok(f"{role} log written to {readable_log}")
+
+    # Relocate stray .md files the agent may have left in the work directory root
+    _collect_stray_logs(work_dir_path, pre_existing_md, cfg.project_dir / "logs")
+
     return session_id
 
 
@@ -637,9 +735,14 @@ def run_agent_structured(
     The parsed_data dict comes from the structured JSON output.
     Falls back to empty dict if parsing fails.
     """
+    prompt = _PROMPT_PREAMBLE + prompt
     log_file = cfg.logs_dir / f"{cfg.run_id}_{log_suffix}.json"
     readable_log = cfg.logs_dir / f"{cfg.run_id}_{log_suffix}.md"
     work_dir = cwd or str(cfg.project_dir)
+
+    # Snapshot .md files before the agent runs
+    work_dir_path = Path(work_dir)
+    pre_existing_md = set(work_dir_path.glob("*.md")) if work_dir_path.is_dir() else set()
 
     global _current_role
     model_label = f" (model: {model})" if model else ""
@@ -710,6 +813,10 @@ def run_agent_structured(
         "cost_usd": usage.get("cost_usd", 0),
         "duration_ms": usage.get("duration_ms", 0),
         "num_turns": usage.get("num_turns", 0),
+        "input_tokens": usage.get("input_tokens", 0),
+        "output_tokens": usage.get("output_tokens", 0),
+        "cache_read_tokens": usage.get("cache_read_tokens", 0),
+        "cache_creation_tokens": usage.get("cache_creation_tokens", 0),
         "timestamp": datetime.now().isoformat(),
     })
 
@@ -729,4 +836,5 @@ def run_agent_structured(
         except (json.JSONDecodeError, TypeError):
             log_warn(f"{role}: could not parse structured output — falling back to empty dict")
 
+    _collect_stray_logs(work_dir_path, pre_existing_md, cfg.project_dir / "logs")
     return session_id, parsed

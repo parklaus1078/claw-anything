@@ -116,6 +116,17 @@ def _extract_files_written(text: str) -> list[str]:
     return list(dict.fromkeys(files))[:10]  # dedupe, limit
 
 
+def _extract_ticket_title(text: str) -> str | None:
+    """Extract the ticket title from a coder sprint log (prompt or output)."""
+    # Match "### Ticket N: Title" from the embedded ticket content
+    m = re.search(r"###\s*Ticket\s*\d+\s*[:—–-]\s*(.+)", text)
+    if m:
+        return m.group(1).strip()
+    # Fallback: "Ticket N of M" header line
+    m = re.search(r"implementing Ticket\s*(\d+).*?YOUR TICKET:", text, re.DOTALL)
+    return None
+
+
 def _extract_tech_stack(text: str) -> str | None:
     """Extract TECH_STACK line from planner output."""
     m = re.search(r"TECH_STACK:\s*(.+)", text)
@@ -218,17 +229,75 @@ def summarize_phase_logs(cfg: RunConfig, phase: str) -> str | None:
     total_cost = 0.0
     total_turns = 0
     total_duration_ms = 0
+    for lf in log_files:
+        c = _read_log_cost(lf)
+        total_cost += c.get("cost_usd", 0)
+        total_turns += c.get("num_turns", 0)
+        total_duration_ms += c.get("duration_ms", 0)
 
-    for log_file in log_files:
-        output = _read_log_output(log_file)
-        cost = _read_log_cost(log_file)
-        total_cost += cost.get("cost_usd", 0)
-        total_turns += cost.get("num_turns", 0)
-        total_duration_ms += cost.get("duration_ms", 0)
+    # --- Multi-file phases (handle all files at once) ---
 
-        agent_name = log_file.stem.replace(f"{cfg.run_id}_", "")
+    if phase == "code_full":
+        sections.append(f"**Sprints completed:** {len(log_files)}")
+        all_files: list[str] = []
+        for sprint_log in log_files:
+            full_text = sprint_log.read_text(encoding="utf-8")
+            sprint_output = _read_log_output(sprint_log)
+            t_match = re.search(r"_T(\d+)", sprint_log.stem)
+            t_num = t_match.group(1) if t_match else "?"
+            t_title = _extract_ticket_title(sprint_output) or _extract_ticket_title(full_text)
+            is_retry = "_A" in sprint_log.stem
+            sprint_files = _extract_files_written(sprint_output)
+            all_files.extend(sprint_files)
+            sprint_cost = _read_log_cost(sprint_log)
+            ticket_label = f"T{t_num}"
+            if t_title:
+                ticket_label += f": {t_title[:60]}"
+            if is_retry:
+                a_match = re.search(r"_A(\d+)", sprint_log.stem)
+                ticket_label += f" (retry #{a_match.group(1)})" if a_match else " (retry)"
+            status_parts = []
+            if sprint_files:
+                status_parts.append(f"{len(sprint_files)} files")
+            if sprint_cost.get("cost_usd"):
+                status_parts.append(f"${sprint_cost['cost_usd']:.4f}")
+            status = f" — {', '.join(status_parts)}" if status_parts else ""
+            sections.append(f"  **{ticket_label}**{status}")
+            for f in sprint_files[:3]:
+                sections.append(f"    - `{f}`")
+        unique_files = list(dict.fromkeys(all_files))
+        if unique_files:
+            sections.append(f"\n**Total files touched:** {len(unique_files)}")
 
-        # Phase-specific extraction
+    elif phase == "code_fix":
+        all_fix_files: list[str] = []
+        for fix_log in log_files:
+            fix_output = _read_log_output(fix_log)
+            fix_files = _extract_files_written(fix_output)
+            all_fix_files.extend(fix_files)
+        unique_fix = list(dict.fromkeys(all_fix_files))
+        if unique_fix:
+            sections.append(f"**Files modified:** {len(unique_fix)}")
+            for f in unique_fix[:8]:
+                sections.append(f"  - `{f}`")
+
+    elif phase == "brainstorm":
+        if len(log_files) > 1:
+            sections.append(f"**Participants:** {len(log_files)} agents across all rounds")
+        personas = set()
+        for lf in log_files:
+            name = lf.stem.replace(f"{cfg.run_id}_brainstorm_", "")
+            name = re.sub(r"^r[123]_", "", name)
+            if name and name != "facilitator":
+                personas.add(name.replace("_", " ").title())
+        if personas:
+            sections.append(f"**Personas:** {', '.join(sorted(personas))}")
+
+    # --- Single-file phases (use only the first/primary log) ---
+
+    else:
+        output = _read_log_output(log_files[0])
+
         if phase == "plan_rules":
             tech = _extract_tech_stack(output)
             if tech:
@@ -243,7 +312,6 @@ def summarize_phase_logs(cfg: RunConfig, phase: str) -> str | None:
             count = _extract_ticket_count(output)
             if count:
                 sections.append(f"**Tickets generated:** {count}")
-            # Show first few ticket titles
             titles = re.findall(r"^### (Ticket \d+:.+)", output, re.MULTILINE)
             for title in titles[:6]:
                 sections.append(f"  - {title}")
@@ -265,29 +333,6 @@ def summarize_phase_logs(cfg: RunConfig, phase: str) -> str | None:
             else:
                 sections.append("No corrections needed.")
 
-        elif phase == "code_full":
-            if len(log_files) > 1:
-                sections.append(f"**Sprints completed:** {len(log_files)}")
-            files = _extract_files_written(output)
-            cmds = _extract_commands_run(output)
-            if files:
-                sections.append(f"**Files touched:** {len(files)}")
-                for f in files[:5]:
-                    sections.append(f"  - `{f}`")
-                if len(files) > 5:
-                    sections.append(f"  - ... and {len(files) - 5} more")
-            if cmds:
-                sections.append("**Commands run:**")
-                for c in cmds[:4]:
-                    sections.append(f"  - `{c}`")
-
-        elif phase == "code_fix":
-            files = _extract_files_written(output)
-            if files:
-                sections.append(f"**Files modified:** {len(files)}")
-                for f in files[:5]:
-                    sections.append(f"  - `{f}`")
-
         elif phase == "review":
             score = _extract_score(output)
             if score is not None:
@@ -295,23 +340,9 @@ def summarize_phase_logs(cfg: RunConfig, phase: str) -> str | None:
             critical, major, minor = _extract_issues(output)
             if critical or major or minor:
                 sections.append(f"**Issues:** {critical} critical, {major} major, {minor} minor")
-            # Show first few critical issues
             crit_items = re.findall(r"^\d+\.\s*(\[(?:BUG|CRITICAL|MISSING)\].+)", output, re.MULTILINE | re.IGNORECASE)
             for item in crit_items[:3]:
                 sections.append(f"  - {item[:120]}")
-
-        elif phase == "brainstorm":
-            if len(log_files) > 1:
-                sections.append(f"**Participants:** {len(log_files)} agents across all rounds")
-            # Extract persona names from filenames
-            personas = set()
-            for lf in log_files:
-                name = lf.stem.replace(f"{cfg.run_id}_brainstorm_", "")
-                name = re.sub(r"^r[123]_", "", name)
-                if name and name != "facilitator":
-                    personas.add(name.replace("_", " ").title())
-            if personas:
-                sections.append(f"**Personas:** {', '.join(sorted(personas))}")
 
         elif phase == "finalize":
             sections.append("README.md generated.")
@@ -321,7 +352,6 @@ def summarize_phase_logs(cfg: RunConfig, phase: str) -> str | None:
                     sections.append(f"  - `{f}`")
 
         elif phase == "evolution":
-            # Count new learnings
             learning_count = output.count("\n- ")
             if learning_count:
                 sections.append(f"**New learnings captured:** ~{learning_count}")

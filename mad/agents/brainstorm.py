@@ -29,8 +29,22 @@ class Persona:
     priorities: str
 
 
-# Default personas — each brings a different lens to the project idea.
-DEFAULT_PERSONAS = [
+# All available personas — keyed by short name for CLI selection.
+PERSONA_REGISTRY: dict[str, Persona] = {}
+
+
+def _register(*personas: Persona) -> list[Persona]:
+    """Register personas and return them as a list."""
+    result = []
+    for p in personas:
+        key = p.name.lower().replace(" ", "-")
+        PERSONA_REGISTRY[key] = p
+        result.append(p)
+    return result
+
+
+# Core personas (used by default)
+_CORE = _register(
     Persona(
         name="Architect",
         expertise="System design, scalability, clean separation of concerns",
@@ -61,7 +75,113 @@ DEFAULT_PERSONAS = [
         thinking_style="Operational thinker. Considers what happens AFTER the code is written.",
         priorities="Deployability, observability, configuration management, reproducible builds, logging",
     ),
-]
+)
+
+# Additional specialist personas (opt-in via --brainstorm-personas)
+_register(
+    Persona(
+        name="Performance Engineer",
+        expertise="Profiling, caching strategies, database optimization, load testing, memory management",
+        thinking_style="Measurement-driven thinker. No optimization without benchmarks, no assumption without data.",
+        priorities="Response times, throughput, resource efficiency, database query optimization, CDN/caching",
+    ),
+    Persona(
+        name="Data Engineer",
+        expertise="Data modeling, ETL pipelines, schema design, migrations, data integrity",
+        thinking_style="Schema-first thinker. The data model is the foundation — get it wrong and everything suffers.",
+        priorities="Normalization, migration safety, indexing strategy, data validation, backup/recovery",
+    ),
+    Persona(
+        name="QA Strategist",
+        expertise="Testing strategy, test automation, edge cases, regression prevention, CI test pipelines",
+        thinking_style="Failure-oriented thinker. Systematically explores what can break and how to catch it early.",
+        priorities="Test coverage, flaky test prevention, E2E testing, boundary conditions, error path testing",
+    ),
+    Persona(
+        name="Accessibility Expert",
+        expertise="WCAG compliance, screen readers, keyboard navigation, color contrast, ARIA patterns",
+        thinking_style="Inclusive thinker. If it doesn't work for everyone, it doesn't work.",
+        priorities="WCAG 2.1 AA compliance, semantic HTML, keyboard operability, screen reader testing, focus management",
+    ),
+    Persona(
+        name="API Designer",
+        expertise="REST/GraphQL design, versioning, pagination, error contracts, OpenAPI specs",
+        thinking_style="Contract-first thinker. The API surface is a promise — design it before building it.",
+        priorities="Consistent naming, proper HTTP semantics, pagination, error formats, backward compatibility",
+    ),
+    Persona(
+        name="Mobile Specialist",
+        expertise="Mobile UX patterns, offline-first design, push notifications, native platform conventions",
+        thinking_style="Constraint-aware thinker. Mobile means small screens, flaky networks, and impatient users.",
+        priorities="Offline support, responsive layouts, touch targets, battery efficiency, platform conventions",
+    ),
+    Persona(
+        name="Domain Expert",
+        expertise="Business logic, regulatory compliance, industry workflows, domain-driven design",
+        thinking_style="Domain-driven thinker. The code should speak the language of the business.",
+        priorities="Correct business logic, compliance, domain vocabulary, workflow accuracy, audit trails",
+    ),
+    Persona(
+        name="Cost Optimizer",
+        expertise="Cloud cost management, resource sizing, serverless trade-offs, build/deploy efficiency",
+        thinking_style="ROI thinker. Every architectural choice has a cost — make it intentional.",
+        priorities="Hosting costs, build times, dependency count, serverless vs. persistent, free-tier awareness",
+    ),
+    Persona(
+        name="AI Engineer",
+        expertise="ML model integration, LLM APIs, vector databases, embeddings, prompt engineering, RAG pipelines",
+        thinking_style="Model-aware thinker. Knows when to use AI and when a simple heuristic is better.",
+        priorities="Model selection, inference latency, token costs, hallucination mitigation, evaluation metrics, fallback strategies",
+    ),
+    Persona(
+        name="CTO",
+        expertise="Technical strategy, team scalability, build-vs-buy decisions, tech debt management, stakeholder communication",
+        thinking_style="Strategic thinker. Balances engineering excellence with business timelines and resource constraints.",
+        priorities="Long-term maintainability, hiring-friendly stack, time-to-market, technical risk, vendor lock-in avoidance",
+    ),
+    Persona(
+        name="MLOps",
+        expertise="ML pipelines, model versioning, experiment tracking, feature stores, model monitoring, GPU infrastructure",
+        thinking_style="Pipeline thinker. Models are only as good as the infrastructure that trains, deploys, and monitors them.",
+        priorities="Reproducibility, model versioning, data drift detection, training pipeline automation, inference scaling",
+    ),
+)
+
+# Default set used when --brainstorm is passed without --brainstorm-personas
+DEFAULT_PERSONAS = _CORE
+
+
+def resolve_personas(names: list[str] | None) -> list[Persona]:
+    """Resolve persona short names to Persona objects.
+
+    Args:
+        names: List of persona short names (e.g., ["architect", "pragmatist", "qa-strategist"]).
+               If None or empty, returns DEFAULT_PERSONAS.
+
+    Returns:
+        List of resolved Persona objects.
+
+    Raises:
+        click.BadParameter: If a name doesn't match any registered persona.
+    """
+    if not names:
+        return list(DEFAULT_PERSONAS)
+
+    import click
+
+    resolved = []
+    for name in names:
+        key = name.lower().strip()
+        if key == "all":
+            return list(PERSONA_REGISTRY.values())
+        if key not in PERSONA_REGISTRY:
+            available = ", ".join(sorted(PERSONA_REGISTRY.keys()))
+            raise click.BadParameter(
+                f"Unknown persona '{name}'. Available: {available}",
+                param_hint="--brainstorm-personas",
+            )
+        resolved.append(PERSONA_REGISTRY[key])
+    return resolved
 
 
 def _round1_prompt(persona: Persona, idea: str) -> str:
@@ -90,9 +210,9 @@ Stay focused on YOUR perspective — other personas will bring theirs.
 Write your analysis clearly and concisely."""
 
 
-def _round2_prompt(persona: Persona, idea: str, round1_files: list[Path]) -> str:
-    """Generate the Round 2 prompt for critique and synthesis."""
-    files_block = "\n".join(f"  - {f}" for f in round1_files)
+def _debate_prompt(persona: Persona, idea: str, round_num: int, prev_files: list[Path]) -> str:
+    """Generate a debate round prompt (Round 2+) for critique and synthesis."""
+    files_block = "\n".join(f"  - {f}" for f in prev_files)
     return f"""\
 You are {persona.name}, continuing the brainstorm discussion.
 
@@ -102,11 +222,11 @@ PRIORITIES: {persona.priorities}
 
 PROJECT IDEA: {idea}
 
-ROUND 1 PROPOSALS (read ALL of these files):
+PREVIOUS ROUND OUTPUTS (read ALL of these files):
 {files_block}
 
-YOUR TASK — ROUND 2 (Critique & Synthesis):
-You have read all Round 1 proposals from the other personas. Now:
+YOUR TASK — ROUND {round_num} (Critique & Synthesis):
+You have read all outputs from the previous round. Now:
 
 1. **Agreements**: Which proposals align with your perspective? Strengthen those points.
 2. **Disagreements**: Where do you disagree with other personas? Explain why from your expertise.
@@ -169,23 +289,29 @@ def run_brainstorm(cfg: RunConfig, *, personas: list[Persona] | None = None, rou
     Args:
         cfg: Run configuration.
         personas: List of personas to use. Defaults to DEFAULT_PERSONAS.
-        rounds: Number of rounds (default 3: independent → critique → consensus).
+        rounds: Total number of rounds (minimum 2).
+                Round 1 = independent analysis, Rounds 2..N-1 = debate, Round N = facilitator consensus.
 
     Returns:
         Path to the consensus document.
     """
     if personas is None:
-        personas = DEFAULT_PERSONAS
+        personas = list(DEFAULT_PERSONAS)
+    rounds = max(2, rounds)
 
     brainstorm_dir = cfg.brainstorm_dir
     brainstorm_dir.mkdir(parents=True, exist_ok=True)
 
+    persona_names = ", ".join(p.name for p in personas)
+    log_info(f"Personas ({len(personas)}): {persona_names}")
+    log_info(f"Rounds: {rounds} (1 independent + {rounds - 2} debate + 1 consensus)")
+
     # ================================================================
     # Round 1: Independent analysis (parallel)
     # ================================================================
-    banner("BRAINSTORM — Round 1/3", "Independent persona analyses")
+    banner(f"BRAINSTORM — Round 1/{rounds}", "Independent persona analyses")
 
-    round1_files: list[Path] = []
+    prev_files: list[Path] = []
 
     def _run_round1(persona: Persona) -> Path:
         out_file = brainstorm_dir / f"round1_{persona.name.lower().replace(' ', '_')}.md"
@@ -209,60 +335,63 @@ def run_brainstorm(cfg: RunConfig, *, personas: list[Persona] | None = None, rou
             persona = futures[future]
             try:
                 out_file = future.result()
-                round1_files.append(out_file)
+                prev_files.append(out_file)
                 log_ok(f"Round 1 complete: {persona.name}")
             except Exception as e:
                 log_warn(f"Round 1 failed for {persona.name}: {e}")
 
-    if not round1_files:
+    if not prev_files:
         log_warn("No Round 1 outputs produced. Skipping brainstorm.")
         return cfg.brainstorm_consensus_file
 
     # ================================================================
-    # Round 2: Critique & synthesis (parallel)
+    # Rounds 2..N-1: Debate rounds (parallel per round, sequential across rounds)
     # ================================================================
-    banner("BRAINSTORM — Round 2/3", "Cross-persona critique & synthesis")
+    for round_num in range(2, rounds):
+        banner(f"BRAINSTORM — Round {round_num}/{rounds}", f"Debate round {round_num - 1}")
 
-    round2_files: list[Path] = []
+        round_files: list[Path] = []
 
-    def _run_round2(persona: Persona) -> Path:
-        out_file = brainstorm_dir / f"round2_{persona.name.lower().replace(' ', '_')}.md"
-        prompt = _round2_prompt(persona, cfg.idea, round1_files)
-        prompt += f"\n\nWrite your synthesis to: {out_file}"
-        run_agent(
-            cfg,
-            role=f"BRAINSTORM-R2-{persona.name.upper().replace(' ', '')}",
-            prompt=prompt,
-            tools=BRAINSTORM_TOOLS,
-            model=cfg.planner_model,
-            log_suffix=f"brainstorm_r2_{persona.name.lower().replace(' ', '_')}",
-            cwd=str(cfg.mad_home),
-            timeout_minutes=10,
-        )
-        return out_file
+        def _run_debate(persona: Persona, rn: int = round_num, pf: list[Path] = prev_files) -> Path:
+            slug = persona.name.lower().replace(" ", "_")
+            out_file = brainstorm_dir / f"round{rn}_{slug}.md"
+            prompt = _debate_prompt(persona, cfg.idea, rn, pf)
+            prompt += f"\n\nWrite your synthesis to: {out_file}"
+            run_agent(
+                cfg,
+                role=f"BRAINSTORM-R{rn}-{persona.name.upper().replace(' ', '')}",
+                prompt=prompt,
+                tools=BRAINSTORM_TOOLS,
+                model=cfg.planner_model,
+                log_suffix=f"brainstorm_r{rn}_{slug}",
+                cwd=str(cfg.mad_home),
+                timeout_minutes=10,
+            )
+            return out_file
 
-    with ThreadPoolExecutor(max_workers=len(personas)) as pool:
-        futures = {pool.submit(_run_round2, p): p for p in personas}
-        for future in as_completed(futures):
-            persona = futures[future]
-            try:
-                out_file = future.result()
-                round2_files.append(out_file)
-                log_ok(f"Round 2 complete: {persona.name}")
-            except Exception as e:
-                log_warn(f"Round 2 failed for {persona.name}: {e}")
+        with ThreadPoolExecutor(max_workers=len(personas)) as pool:
+            futures = {pool.submit(_run_debate, p): p for p in personas}
+            for future in as_completed(futures):
+                persona = futures[future]
+                try:
+                    out_file = future.result()
+                    round_files.append(out_file)
+                    log_ok(f"Round {round_num} complete: {persona.name}")
+                except Exception as e:
+                    log_warn(f"Round {round_num} failed for {persona.name}: {e}")
 
-    if not round2_files:
-        log_warn("No Round 2 outputs produced. Using Round 1 outputs for consensus.")
-        round2_files = round1_files
+        if round_files:
+            prev_files = round_files
+        else:
+            log_warn(f"No Round {round_num} outputs produced. Using previous round outputs.")
 
     # ================================================================
-    # Round 3: Facilitator consensus
+    # Final round: Facilitator consensus
     # ================================================================
-    banner("BRAINSTORM — Round 3/3", "Facilitator consensus")
+    banner(f"BRAINSTORM — Round {rounds}/{rounds}", "Facilitator consensus")
 
     consensus_file = cfg.brainstorm_consensus_file
-    prompt = _facilitator_prompt(cfg.idea, round2_files)
+    prompt = _facilitator_prompt(cfg.idea, prev_files)
     prompt += f"\n\nWrite the consensus document to: {consensus_file}"
 
     run_agent(
@@ -271,7 +400,7 @@ def run_brainstorm(cfg: RunConfig, *, personas: list[Persona] | None = None, rou
         prompt=prompt,
         tools=BRAINSTORM_TOOLS,
         model=cfg.planner_model,
-        log_suffix="brainstorm_r3_facilitator",
+        log_suffix=f"brainstorm_r{rounds}_facilitator",
         cwd=str(cfg.mad_home),
         timeout_minutes=10,
     )

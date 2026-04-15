@@ -12,9 +12,10 @@ You describe a project. MAD decomposes it into detailed tickets, researches offi
   ▼
 ┌──────────────────────────────────────────────────────┐
 │  BRAINSTORM (optional: --brainstorm)                 │
-│  Multi-persona debate: Architect, Pragmatist,        │
-│  Security Expert, UX Advocate, DevOps Engineer       │
-│  3 rounds → Consensus document                       │
+│  16 personas available (5 default), configurable     │
+│  N rounds (default 3) → Consensus document           │
+│  --brainstorm-personas architect,cto,ai-engineer     │
+│  --brainstorm-rounds 5                               │
 └──────────────────────┬───────────────────────────────┘
                        ▼
 ┌──────────────────────────────────────────────────────┐
@@ -38,8 +39,8 @@ You describe a project. MAD decomposes it into detailed tickets, researches offi
                        ▼
 ┌──────────────────────────────────────────────────────┐
 │  REVIEWER  (fresh context — unbiased)                │
-│  Static analysis + build/test + structured scoring   │
-│  Diff-aware on iteration 2+ (focuses on changes)     │
+│  Adaptive E2E: Playwright for web, Bash for CLI/API  │
+│  Structured scoring + diff-aware on iteration 2+     │
 └──────┬───────────────────────┬───────────────────────┘
        │ score < threshold     │ score >= threshold
        ▼                       │
@@ -69,7 +70,8 @@ You describe a project. MAD decomposes it into detailed tickets, researches offi
 - **Diff-aware reviews**: On iteration 2+, the reviewer sees a `git diff` of what changed, focusing verification on fixes instead of re-reading everything.
 - **Structured scoring**: Review scores are extracted via `--json-schema` for deterministic pass/fail decisions. Regex fallback for robustness.
 - **Evolution with validation**: Cross-project learnings are tracked alongside metrics. Learnings that correlate with declining scores get flagged for removal.
-- **Multi-persona brainstorm**: Optional `--brainstorm` mode runs 5 persona-agents (Architect, Pragmatist, Security Expert, UX Advocate, DevOps Engineer) through 3 rounds of structured debate before planning.
+- **Multi-persona brainstorm**: Optional `--brainstorm` mode runs configurable persona-agents through N rounds of structured debate before planning. 16 personas available (5 default), selectable via `--brainstorm-personas`.
+- **Adaptive E2E testing**: The Reviewer auto-detects project type (web, CLI, API, library, desktop, mobile) and uses Playwright browser automation for web apps, Bash-based functional testing for CLIs/APIs, and build verification for other types.
 
 ## Prerequisites
 
@@ -150,6 +152,8 @@ mad run [project_dir] ["<idea>"] [OPTIONS]
 #   --pass-score FLOAT             Score to auto-approve [default: from settings, fallback 9.0]
 #   --budget FLOAT                 Per-call budget in USD [default: from settings]
 #   --brainstorm                   Run multi-persona brainstorm before planning
+#   --brainstorm-personas TEXT     Comma-separated persona names (e.g., 'architect,cto,ai-engineer')
+#   --brainstorm-rounds INTEGER    Number of brainstorm rounds [default: 3]
 #   --model TEXT                   Set same model for all agents
 #   --planner-model TEXT           Model for planner
 #   --coder-model TEXT             Model for coder
@@ -165,6 +169,7 @@ mad run ~/projects/chat-app "A real-time chat app with rooms and a retro termina
 mad run ./todo-app "A minimalist todo app with brutalist UI" -n 3 --pass-score 8.5
 mad run --budget 10.0 --model opus
 mad run ./my-app "A task manager" --brainstorm
+mad run ./ml-app "An ML pipeline" --brainstorm --brainstorm-personas architect,ai-engineer,mlops,cto --brainstorm-rounds 5
 ```
 
 ### `mad plan` — Planning only
@@ -183,11 +188,13 @@ Implements all tickets via per-ticket sprints with self-verification.
 mad code [project_dir] ["<idea>"]
 ```
 
-### `mad review` — Review only
+### `mad review` — Review/fix loop
 
 ```bash
-mad review [project_dir] ["<idea>"] [-i ITERATION] [--pass-score FLOAT]
+mad review [project_dir] ["<idea>"] [-i ITERATIONS] [--pass-score FLOAT]
 ```
+
+Runs up to N iterations of review → fix → review → ... until approved or max reached. Iteration numbering **continues from previous runs** — if you already ran 10 iterations, `mad review -i 5` runs iterations 11–15.
 
 ### `mad fix` — Fix one cycle
 
@@ -216,7 +223,8 @@ mad projects            # List all registered projects
 mad select <name>       # Set active project (skip dir/idea on future commands)
 mad status              # Show artifacts and resume info for active project
 mad logs [-n 50]        # List recent agent logs
-mad costs               # Show cost breakdown for last run
+mad tokens              # Show cumulative token usage for active project
+mad personas            # List all available brainstorm personas
 ```
 
 ### Agent Registry
@@ -276,20 +284,14 @@ vim projects/my-project/specs/tickets.md
 # 4. Code — implement all tickets (per-ticket sprints)
 mad code
 
-# 5. Review — build, test, evaluate
-mad review -i 1
+# 5. Review — build, test, evaluate (iterative review↔fix loop)
+mad review -i 5
 
-# 6. Fix — address issues
-mad fix
-
-# 7. Review again
-mad review -i 2
-
-# 8. Finalize — write README and capture learnings
+# 6. Finalize — write README and capture learnings
 mad finalize
 
-# 9. Check costs
-mad costs
+# 7. Check token usage
+mad tokens
 ```
 
 ## Project Structure
@@ -316,11 +318,12 @@ multi-agent-dev/
 │   ├── i18n.py                    # Internationalization (Korean, English, Chinese)
 │   ├── discord_webhook.py         # Discord webhook integration (live streaming)
 │   ├── discord_bot.py             # Discord command bot (receive commands via Discord)
+│   ├── project_detect.py           # Auto-detect project type for adaptive testing
 │   └── agents/
-│       ├── brainstorm.py          # Multi-persona brainstorm (5 personas, 3 rounds)
+│       ├── brainstorm.py          # Multi-persona brainstorm (16 personas, configurable rounds)
 │       ├── planner.py             # 4-step: rules → domain research → tech research → tickets
 │       ├── coder.py               # Per-ticket sprints with self-verification
-│       ├── reviewer.py            # Structured scoring, diff-aware reviews
+│       ├── reviewer.py            # Adaptive E2E testing + structured scoring
 │       └── finalizer.py           # README generation + evolution with metrics
 │
 ├── rules/                         # Coding rules (shared across projects)
@@ -348,7 +351,9 @@ multi-agent-dev/
 
 ## Brainstorm Mode
 
-The optional `--brainstorm` flag runs a multi-persona debate before the planning phase. Five personas with distinct perspectives analyze the project idea:
+The optional `--brainstorm` flag runs a multi-persona debate before the planning phase. 16 personas are available (5 run by default), and you can select specific ones with `--brainstorm-personas`.
+
+### Default Personas (run with `--brainstorm`)
 
 | Persona | Focus |
 |---------|-------|
@@ -358,16 +363,45 @@ The optional `--brainstorm` flag runs a multi-persona debate before the planning
 | **UX Advocate** | User experience, accessibility, information architecture |
 | **DevOps Engineer** | CI/CD, deployment, monitoring, infrastructure |
 
-The brainstorm runs in **3 rounds**:
+### Additional Personas (opt-in via `--brainstorm-personas`)
+
+| Persona | Focus |
+|---------|-------|
+| **AI Engineer** | ML model integration, LLM APIs, vector databases, RAG pipelines |
+| **CTO** | Technical strategy, build-vs-buy, tech debt, stakeholder communication |
+| **MLOps** | ML pipelines, model versioning, experiment tracking, GPU infrastructure |
+| **Performance Engineer** | Profiling, caching, database optimization, load testing |
+| **Data Engineer** | Data modeling, ETL pipelines, schema design, migrations |
+| **QA Strategist** | Testing strategy, automation, edge cases, regression prevention |
+| **Accessibility Expert** | WCAG compliance, screen readers, keyboard navigation |
+| **API Designer** | REST/GraphQL design, versioning, pagination, error contracts |
+| **Mobile Specialist** | Mobile UX, offline-first, push notifications, platform conventions |
+| **Domain Expert** | Business logic, regulatory compliance, domain-driven design |
+| **Cost Optimizer** | Cloud costs, resource sizing, serverless trade-offs |
+
+Run `mad personas` to see the full list with details.
+
+### Rounds
+
+The brainstorm runs in **N rounds** (default 3, configurable via `--brainstorm-rounds`):
 
 1. **Round 1** (parallel): Each persona independently analyzes the idea
-2. **Round 2** (parallel): Each persona reads all Round 1 outputs, critiques and synthesizes
-3. **Round 3**: A Facilitator merges all perspectives into a consensus document
+2. **Rounds 2..N-1** (parallel per round): Each persona reads all previous outputs, critiques and synthesizes
+3. **Round N**: A Facilitator merges all perspectives into a consensus document
+
+More rounds = deeper debate. Minimum 2 (independent analysis + consensus).
 
 The consensus document is then used by the Planner for tech stack selection and ticket generation.
 
 ```bash
-mad run ./my-app "A healthcare patient portal with appointment scheduling" --brainstorm
+# Default: 5 personas, 3 rounds
+mad run ./my-app "A healthcare patient portal" --brainstorm
+
+# Custom: pick specific personas for an ML project
+mad run ./ml-app "A recommendation engine" --brainstorm --brainstorm-personas architect,ai-engineer,mlops,data-engineer,cto
+
+# All personas with 5 rounds of debate
+mad run ./my-app "A fintech platform" --brainstorm --brainstorm-personas all --brainstorm-rounds 5
 ```
 
 ## Planner Pipeline
@@ -395,7 +429,19 @@ Instead of implementing the entire project in one shot (which exhausts context o
 
 Sprint progress is tracked in the state file, so `mad resume` picks up at the exact ticket where a crash occurred.
 
-## Reviewer: Structured Scoring
+## Reviewer: Adaptive E2E Testing & Structured Scoring
+
+The Reviewer **auto-detects the project type** and adapts its testing strategy:
+
+| Project Type | Detection | Testing Strategy |
+|---|---|---|
+| **Web (fullstack/frontend/backend)** | React, Vue, Next.js, Express, FastAPI, etc. | Playwright browser automation: navigate pages, fill forms, click buttons, take screenshots, monitor network requests and console errors |
+| **CLI** | click, argparse, typer, clap | Bash functional testing: run commands, verify exit codes, test error cases |
+| **Library** | setup.py, package exports | Run test suite, verify imports |
+| **Desktop** | Electron, Tauri | Build verification + Playwright for Electron web views |
+| **Mobile** | React Native, Flutter | Build verification |
+
+For web projects, the reviewer is granted **Playwright MCP tools** (`browser_navigate`, `browser_click`, `browser_fill_form`, `browser_take_screenshot`, etc.) and performs real browser-based E2E testing. Screenshots are saved to `{project_dir}/screenshots/`.
 
 The Reviewer evaluates against these criteria (each scored 0-10):
 
@@ -406,9 +452,10 @@ The Reviewer evaluates against these criteria (each scored 0-10):
 | Code quality | Follows coding rules? Clean structure? Error handling? |
 | Doc compliance | Used correct APIs/versions from research.md? |
 | Domain compliance | Regulatory requirements implemented? (if applicable) |
+| Integration | API routes, CORS, ports, env vars consistent across components? (if multi-component) |
 | Security | No hardcoded secrets? Input validation? OWASP risks? |
 | Testing | Tests present, passing, covering critical paths? |
-| UI quality | Unique/artistic yet usable? (code review, not visual) |
+| UI quality | Unique/artistic yet usable? Verified via Playwright for web projects |
 | DX | Can a new developer clone, install, and run it? |
 
 Scores are extracted via `--json-schema` for deterministic parsing. The overall score determines pass/fail against the configurable threshold (default: 9.0/10).
@@ -424,18 +471,25 @@ MAD improves across projects:
 3. **Metrics validation**: scores are tracked in `evolution/metrics.json`. The evolution agent compares trends — learnings that correlate with declining scores get flagged as "suspect," while those correlated with improvement are marked "validated"
 4. All agents read the learnings file on future runs
 
-## Cost Tracking
+## Token Tracking
 
-Every `claude -p` call's cost, duration, and turn count are tracked automatically.
+Every `claude -p` call's input and output token counts are tracked automatically. At the end of each command, MAD prints a summary:
+
+```
+TOKENS: input - 1,234,567 / output - 456,789
+```
+
+Token usage is accumulated per-project across runs:
 
 ```bash
-# View costs for the last run
-mad costs
+# View cumulative token usage for the active project
+mad tokens
 
-# Set a per-call budget limit
-mad set-model --budget 5.0
-mad run --budget 10.0
+# View for a specific project
+mad tokens my-project
 ```
+
+The `mad tokens` command shows per-run breakdowns and cumulative totals (input/output).
 
 ## Crash Recovery
 
@@ -763,7 +817,7 @@ Every agent invocation is **self-contained from files** — no session resumptio
 | Brainstorm | Read, Grep, Glob, Write, WebSearch, WebFetch | Persona analysis + consensus writing. |
 | Coder | Read, Edit, Write, Bash, Grep, Glob | Full implementation capabilities. |
 | Verifier | Read, Bash, Grep, Glob, Skill | Build + test only. Skills for specialized checks. |
-| Reviewer | Read, Bash, Grep, Glob, Write, Skill | Test + write reports. Skills for advanced evaluation. |
+| Reviewer | Read, Bash, Grep, Glob, Write, Skill + Playwright (web) | Test + write reports. Playwright browser tools added for web projects. |
 | Finalizer | Read, Write, Grep, Glob | Write README + learnings. No Bash needed. |
 
 Tool permissions can be overridden per-agent via `agent_overrides` in `settings.json`.
@@ -787,7 +841,7 @@ Skills are available to Planner, Reviewer, and Verifier. The Coder and Finalizer
 - **Requires Claude Code CLI** — orchestrates `claude` commands; does not call the Anthropic API directly
 - **Long-running** — a full `mad run` can take 30 minutes to several hours depending on project complexity
 - **Token usage** — each sprint, review, and fix cycle consumes tokens; per-ticket sprints use more calls but produce better code
-- **No visual testing** — the Reviewer does static analysis and runs test suites; browser-based visual testing via Playwright MCP is available as a plugin but not yet integrated into the review pipeline
+- **Visual testing (web only)** — Playwright browser automation is integrated for web projects (fullstack, frontend, backend). Desktop, mobile, and CLI projects rely on Bash-based testing and build verification
 - **Research accuracy** — WebSearch results are spot-checked but not guaranteed; domain research should be human-reviewed for regulated industries
 - **Discord bot** — requires a separate long-running process (`mad bot`); the bot dispatches commands via subprocess, so the MAD CLI must be installed in the same environment
 

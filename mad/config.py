@@ -117,10 +117,18 @@ def get_fallback_backend() -> str | None:
     return None
 
 
+# Maps agent role prefixes to fallback webhook keys when no direct match exists.
+# e.g., BRAINSTORM agents log to the PLANNER channel since brainstorm is a pre-planning phase.
+_WEBHOOK_FALLBACKS = {
+    "BRAINSTORM": "PLANNER",
+}
+
+
 def get_webhook_url(role: str) -> str | None:
     """Get the Discord webhook URL for an agent role, or None if not configured.
 
     Matches the role prefix against webhook keys (e.g. role 'CODER-T1' matches key 'CODER').
+    Falls back to _WEBHOOK_FALLBACKS if no direct or prefix match is found.
     """
     settings = load_settings()
     webhooks = settings.get("webhooks", {})
@@ -131,6 +139,12 @@ def get_webhook_url(role: str) -> str | None:
     for key, url in webhooks.items():
         if role_upper.startswith(key.upper()) and url:
             return url
+    # Fallback: check if the role prefix maps to another webhook key
+    for prefix, fallback_key in _WEBHOOK_FALLBACKS.items():
+        if role_upper.startswith(prefix):
+            fb = webhooks.get(fallback_key, webhooks.get(fallback_key.upper()))
+            if fb:
+                return fb
     return None
 
 
@@ -287,3 +301,25 @@ CODER_TOOLS = "Read,Edit,Write,Bash,Grep,Glob"
 REVIEWER_TOOLS = "Read,Bash,Grep,Glob,Write,Skill"
 FINALIZER_TOOLS = "Read,Write,Grep,Glob"
 VERIFIER_TOOLS = "Read,Bash,Grep,Glob,Skill"
+
+# Playwright browser tools for E2E testing (web projects only)
+PLAYWRIGHT_TOOLS = (
+    "mcp__plugin_playwright_playwright__browser_navigate,"
+    "mcp__plugin_playwright_playwright__browser_snapshot,"
+    "mcp__plugin_playwright_playwright__browser_click,"
+    "mcp__plugin_playwright_playwright__browser_fill_form,"
+    "mcp__plugin_playwright_playwright__browser_take_screenshot,"
+    "mcp__plugin_playwright_playwright__browser_press_key,"
+    "mcp__plugin_playwright_playwright__browser_select_option,"
+    "mcp__plugin_playwright_playwright__browser_wait_for,"
+    "mcp__plugin_playwright_playwright__browser_tabs,"
+    "mcp__plugin_playwright_playwright__browser_navigate_back,"
+    "mcp__plugin_playwright_playwright__browser_console_messages,"
+    "mcp__plugin_playwright_playwright__browser_network_requests,"
+    "mcp__plugin_playwright_playwright__browser_hover,"
+    "mcp__plugin_playwright_playwright__browser_evaluate,"
+    "mcp__plugin_playwright_playwright__browser_close"
+)
+
+# Reviewer with browser E2E capabilities
+REVIEWER_TOOLS_BROWSER = REVIEWER_TOOLS + "," + PLAYWRIGHT_TOOLS

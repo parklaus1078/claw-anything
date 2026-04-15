@@ -11,8 +11,9 @@ import re
 import subprocess
 from datetime import datetime
 
-from mad.config import REVIEWER_TOOLS, RunConfig
+from mad.config import REVIEWER_TOOLS, REVIEWER_TOOLS_BROWSER, RunConfig
 from mad.console import banner, log_info, log_ok, log_warn
+from mad.project_detect import ProjectType, detect_project_type
 from mad.runner import run_agent, run_agent_structured
 
 
@@ -133,11 +134,112 @@ def _parse_score(content: str) -> float | None:
     return None
 
 
+_WEB_TEST_BLOCK = """\
+6. BUILD, START & E2E TEST:
+   - Install dependencies and build the project
+   - Start all services (docker-compose up, or manually start backend + frontend)
+   - Wait for services to be ready (health checks or port checks via Bash)
+   - First, create a screenshots directory: use Bash to run `mkdir -p {screenshots_dir}`
+   - Use Playwright browser tools to perform REAL E2E testing:
+     a. Navigate to the app URL (e.g., http://localhost:3000)
+     b. Take a screenshot of the landing page
+     c. For each major user flow defined in the tickets:
+        - Navigate to the relevant page
+        - Fill forms, click buttons, interact with UI elements
+        - Verify the page updates correctly (check snapshots for expected text/elements)
+        - Check browser console for JavaScript errors
+        - Monitor network requests for failed API calls (4xx/5xx responses)
+     d. Test responsive behavior if applicable
+     e. Take screenshots of key pages for the review log
+   - SCREENSHOT RULE: ALL screenshots MUST be saved under `{screenshots_dir}/`.
+     When calling browser_take_screenshot, ALWAYS set the `filename` parameter to
+     `{screenshots_dir}/<descriptive-name>.png` (e.g., `{screenshots_dir}/landing-page.png`,
+     `{screenshots_dir}/login-form-filled.png`). NEVER save screenshots to the project root.
+   - For API-only backends: also test endpoints with curl via Bash
+   - Record all test results (screenshots, console errors, network failures)
+   - IMPORTANT: After testing, close the browser and stop all services you started"""
+
+_CLI_TEST_BLOCK = """\
+6. BUILD & FUNCTIONAL TEST:
+   - Install/build the project
+   - Run the CLI with --help to verify it starts
+   - Test each major command defined in tickets with sample inputs via Bash
+   - Test error cases (invalid args, missing files, etc.)
+   - Verify exit codes are correct
+   - Check stderr/stdout output matches expected behavior
+
+NOTE: You CANNOT perform browser-based visual testing. Score UI quality based on
+code review of components/templates/styles, not visual inspection."""
+
+_LIBRARY_TEST_BLOCK = """\
+6. BUILD & UNIT TEST:
+   - Install dependencies and build
+   - Run the full test suite
+   - If no tests exist, write and run basic smoke tests via Bash
+   - Verify the package can be imported/used as documented
+
+NOTE: You CANNOT perform browser-based visual testing. Score UI quality based on
+code review of components/templates/styles, not visual inspection."""
+
+_DESKTOP_TEST_BLOCK = """\
+6. BUILD VERIFICATION:
+   - Install dependencies
+   - Run the full build pipeline (ensure it compiles without errors)
+   - Run the test suite if present
+   - For Electron apps with a dev server: use Playwright browser tools to test the web view
+   - Note: Full UI testing of native windows requires a display server; record what you tested
+
+NOTE: For non-web desktop components, score UI quality based on code review only."""
+
+_MOBILE_TEST_BLOCK = """\
+6. BUILD VERIFICATION:
+   - Install dependencies
+   - Run the full build pipeline (ensure it compiles without errors)
+   - Run the test suite if present
+   - Verify the app structure matches platform conventions (Android/iOS layouts, manifests, etc.)
+
+NOTE: You CANNOT perform mobile UI testing. Score UI quality based on code review only."""
+
+_UNKNOWN_TEST_BLOCK = """\
+6. BUILD & TEST (best effort):
+   - Attempt to identify build/test commands from package.json, Makefile, Cargo.toml, etc.
+   - Run whatever test suite exists
+   - Start any server processes and verify they don't crash
+
+NOTE: You CANNOT perform browser-based visual testing. Score UI quality based on
+code review of components/templates/styles, not visual inspection."""
+
+
+def _get_test_block(ptype: ProjectType) -> str:
+    if ptype in (ProjectType.WEB_FULLSTACK, ProjectType.WEB_FRONTEND, ProjectType.WEB_BACKEND):
+        return _WEB_TEST_BLOCK
+    if ptype == ProjectType.CLI:
+        return _CLI_TEST_BLOCK
+    if ptype == ProjectType.LIBRARY:
+        return _LIBRARY_TEST_BLOCK
+    if ptype == ProjectType.DESKTOP:
+        return _DESKTOP_TEST_BLOCK
+    if ptype == ProjectType.MOBILE:
+        return _MOBILE_TEST_BLOCK
+    return _UNKNOWN_TEST_BLOCK
+
+
+def _is_web_project(ptype: ProjectType) -> bool:
+    return ptype in (ProjectType.WEB_FULLSTACK, ProjectType.WEB_FRONTEND, ProjectType.WEB_BACKEND)
+
+
 def run_reviewer(cfg: RunConfig, *, iteration: int) -> tuple[bool, dict]:
     """Run the reviewer.  Returns (approved, score_data)."""
 
-    banner(f"REVIEWER — Iteration {iteration}", "E2E Testing & Evaluation")
+    ptype = detect_project_type(cfg.project_dir)
+    use_browser = _is_web_project(ptype)
+    tools = REVIEWER_TOOLS_BROWSER if use_browser else REVIEWER_TOOLS
+    screenshots_dir = cfg.project_dir / "screenshots"
+    test_block = _get_test_block(ptype).format(screenshots_dir=screenshots_dir)
+
+    banner(f"REVIEWER — Iteration {iteration}", f"E2E Testing & Evaluation ({ptype.value})")
     log_info(f"Pass threshold: {cfg.pass_score}/10")
+    log_info(f"Project type: {ptype.value} — {'browser E2E enabled' if use_browser else 'Bash-only testing'}")
 
     evolution_block = ""
     if cfg.evolution_file.exists():
@@ -218,21 +320,25 @@ YOUR PROCESS:
    - Check all files created
    - Verify directory structure matches conventions
    - Check .gitignore, .env.example exist
-5. BUILD & TEST:
-   - Install dependencies
-   - Build/compile the project (npm run build, cargo build, go build, etc.)
-   - Run the full test suite and record pass/fail results
-   - Start the server/app and verify it launches without errors
-   - For API projects: use curl/wget via Bash to test key endpoints against a running instance
-6. STATIC CODE REVIEW:
+5. INTEGRATION CONSISTENCY CHECK (for multi-component projects):
+   If the project has multiple components (frontend + backend, microservices, etc.):
+   - Read the Integration Contract at the top of the tickets file (if it exists)
+   - Verify ALL API route paths are IDENTICAL between frontend calls and backend route definitions
+     (e.g., frontend fetches `/api/v1/users` and backend defines router prefix `/users`, not `/user`)
+   - Verify CORS configuration includes ALL frontend origins (both `http://localhost:PORT` and
+     Docker-internal origins like `http://frontend:PORT`)
+   - Verify docker-compose.yml has correct `depends_on` with health checks
+   - Verify environment variables are consistent: same port numbers, same service names,
+     same database URLs across docker-compose.yml, .env.example, and application config
+   - Verify frontend proxy/rewrite config targets the correct backend URL and port
+   - Verify shared data types/schemas match between frontend and backend
+   - Any mismatch here is a CRITICAL [BUG] — these cause runtime connection failures
+{test_block}
+7. STATIC CODE REVIEW:
    - Read every source file and check for bugs, anti-patterns, missing error handling
    - Verify each ticket's acceptance criteria against the actual implementation
    - Check code paths for logic errors, missing edge cases, incorrect API usage
-
-NOTE: You CANNOT perform browser-based visual testing. Score UI quality based on
-code review of components/templates/styles, not visual inspection. Be honest about
-what you tested versus what you could only review statically.
-7. EVALUATE against these criteria (each scored 0-10):
+8. EVALUATE against these criteria (each scored 0-10):
    a. **Ticket compliance**: Was every ticket fully implemented? Check each acceptance criterion.
    b. **Functionality**: Does the project actually work? Can it start, serve requests, render pages?
    c. **Code quality**: Does it follow the coding rules? Clean structure? Proper error handling?
@@ -241,10 +347,13 @@ what you tested versus what you could only review statically.
    e. **Domain compliance** (if domain_research.md exists and is not SKIPPED):
       Are all regulatory requirements implemented? Data encryption, access controls, audit logging,
       required workflows, mandatory validations? Non-compliance is ALWAYS a CRITICAL issue.
-   f. **Security**: Hardcoded secrets? Input validation? OWASP top 10 risks?
-   g. **Testing**: Are tests present, passing, and covering critical paths?
-   h. **UI quality** (if applicable): Is the UI unique/artistic yet usable? Or is it generic/broken?
-   i. **DX**: Can a new developer clone, install, configure, and run this project easily?
+   f. **Integration** (if multi-component): Do all API routes match between frontend and backend?
+      CORS origins correct? Docker networking correct? Env vars consistent? Proxy config correct?
+      Score 0 if ANY route mismatch exists — a single wrong path breaks the entire feature.
+   g. **Security**: Hardcoded secrets? Input validation? OWASP top 10 risks?
+   h. **Testing**: Are tests present, passing, and covering critical paths?
+   i. **UI quality** (if applicable): Is the UI unique/artistic yet usable? Or is it generic/broken?
+   j. **DX**: Can a new developer clone, install, configure, and run this project easily?
 
 SCORING — You MUST include this exact format in BOTH the refinement file and the review log:
 
@@ -253,6 +362,7 @@ SCORING — You MUST include this exact format in BOTH the refinement file and t
 - Functionality: X/10
 - Code quality: X/10
 - Doc compliance: X/10
+- Integration: X/10 (or N/A if single-component)
 - Domain compliance: X/10 (or N/A if not domain-specific)
 - Security: X/10
 - Testing: X/10
@@ -332,7 +442,7 @@ RULES:
         cfg,
         role=f"REVIEWER-I{iteration}",
         prompt=prompt,
-        tools=REVIEWER_TOOLS,
+        tools=tools,
         model=cfg.reviewer_model,
         log_suffix=f"reviewer_iteration_{iteration}",
     )

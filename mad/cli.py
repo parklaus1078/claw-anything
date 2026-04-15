@@ -38,7 +38,6 @@ from mad.config import (
     load_settings,
     save_settings,
 )
-from mad.costs import CallCost, RunCosts
 from mad.runner import get_run_costs, reset_run_costs
 from mad.console import (
     banner,
@@ -187,6 +186,18 @@ def _init_git(cfg: RunConfig) -> None:
             cwd=str(cfg.project_dir), capture_output=True,
         )
         log_info(f"Initialized git repo at {cfg.project_dir}")
+    # Ensure agent-generated directories are gitignored
+    gitignore = cfg.project_dir / ".gitignore"
+    mad_entries = ["logs/", "screenshots/"]
+    if gitignore.exists():
+        content = gitignore.read_text(encoding="utf-8")
+        lines = content.splitlines()
+        missing = [e for e in mad_entries if e not in lines]
+        if missing:
+            with open(gitignore, "a", encoding="utf-8") as f:
+                f.write(f"\n# MAD agent artifacts\n" + "\n".join(missing) + "\n")
+    else:
+        gitignore.write_text("# MAD agent artifacts\n" + "\n".join(mad_entries) + "\n", encoding="utf-8")
 
 
 def _resolve_models(
@@ -249,18 +260,50 @@ def _print_summary(cfg: RunConfig, approved: bool, iterations: int) -> None:
     console.print()
 
 
-def _save_run_costs(cfg: RunConfig) -> None:
-    """Save accumulated costs to the project's specs dir."""
+def _token_usage_file(cfg: RunConfig) -> Path:
+    """Path to the cumulative token usage file for the active project."""
+    if cfg.project_slug:
+        return cfg.mad_home / "projects" / cfg.project_slug / "token_usage.json"
+    return cfg.mad_home / "token_usage.json"
+
+
+def _accumulate_tokens(cfg: RunConfig, input_tokens: int, output_tokens: int) -> None:
+    """Append this run's tokens to the project's cumulative usage file."""
+    import json as _json
+    path = _token_usage_file(cfg)
+    existing = {"input_tokens": 0, "output_tokens": 0, "runs": []}
+    if path.exists():
+        try:
+            existing = _json.loads(path.read_text(encoding="utf-8"))
+        except (ValueError, TypeError):
+            pass
+    existing["input_tokens"] = existing.get("input_tokens", 0) + input_tokens
+    existing["output_tokens"] = existing.get("output_tokens", 0) + output_tokens
+    existing.setdefault("runs", []).append({
+        "run_id": cfg.run_id,
+        "input_tokens": input_tokens,
+        "output_tokens": output_tokens,
+        "timestamp": datetime.now().isoformat(),
+    })
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(_json.dumps(existing, indent=2) + "\n", encoding="utf-8")
+
+
+# Global reference so _print_token_summary can persist without cfg being passed every time.
+_active_cfg: RunConfig | None = None
+
+
+def _print_token_summary() -> None:
+    """Print token consumption for the current run and persist to project totals."""
     costs_data = get_run_costs()
     if not costs_data:
         return
-    calls = [CallCost(**c) for c in costs_data]
-    rc = RunCosts(run_id=cfg.run_id, project_slug=cfg.project_slug, calls=calls)
-    costs_file = cfg.specs_dir / ".run_costs.json"
-    rc.save(costs_file)
-    total = rc.total_cost_usd
-    if total > 0:
-        log_info(f"Total cost: ${total:.4f}")
+    total_in = sum(c.get("input_tokens", 0) for c in costs_data)
+    total_out = sum(c.get("output_tokens", 0) for c in costs_data)
+    if total_in or total_out:
+        console.print(f"\nTOKENS: input - {total_in:,} / output - {total_out:,}")
+        if _active_cfg:
+            _accumulate_tokens(_active_cfg, total_in, total_out)
 
 
 def _handle_agent_error(e: AgentLimitError | AgentError, state: RunState, cfg: RunConfig) -> None:
@@ -283,7 +326,7 @@ def _handle_agent_error(e: AgentLimitError | AgentError, state: RunState, cfg: R
 # ===========================================================================
 
 def _run_pipeline(cfg: RunConfig, state: RunState, *, skip_plan: bool = False, skip_code: bool = False,
-                   brainstorm: bool = False) -> None:
+                   brainstorm: bool = False, brainstorm_personas=None, brainstorm_rounds: int = 3) -> None:
     """Execute the pipeline from wherever state says we left off."""
     from mad.agents import run_brainstorm, run_coder, run_evolution, run_finalizer, run_planner, run_reviewer
     from mad.summary import PhaseTimer, post_phase_summary
@@ -293,7 +336,7 @@ def _run_pipeline(cfg: RunConfig, state: RunState, *, skip_plan: bool = False, s
         if brainstorm and state.phase not in ("brainstorm", "plan", "code", "review", "fix", "finalize", "evolution"):
             phase_banner(0, "BRAINSTORM", "Multi-persona debate on project approach")
             with PhaseTimer("brainstorm", cfg=cfg) as bs_pt:
-                run_brainstorm(cfg)
+                run_brainstorm(cfg, personas=brainstorm_personas, rounds=brainstorm_rounds)
             bs_pt.summary(outcome="Brainstorm consensus generated")
             state.mark(cfg, phase="brainstorm")
 
@@ -397,11 +440,11 @@ def _run_pipeline(cfg: RunConfig, state: RunState, *, skip_plan: bool = False, s
         state.mark(cfg, phase="evolution", finished=True)
 
         # Save costs
-        _save_run_costs(cfg)
+        _print_token_summary()
         _print_summary(cfg, approved, iteration)
 
     except AgentLimitError as e:
-        _save_run_costs(cfg)  # save partial costs even on failure
+        _print_token_summary()  # save partial costs even on failure
         _handle_agent_error(e, state, cfg)
         raise SystemExit(1)
     except AgentError as e:
@@ -413,7 +456,7 @@ def _run_pipeline(cfg: RunConfig, state: RunState, *, skip_plan: bool = False, s
         log_warn("Interrupted. Progress saved — run 'mad resume' to continue.")
         raise SystemExit(130)
     except Exception as e:
-        _save_run_costs(cfg)
+        _print_token_summary()
         state.save(cfg)
         console.print()
         log_err(f"Unexpected error: {e}")
@@ -562,18 +605,24 @@ def init(force: bool):
 @click.option("--pass-score", default=None, type=float, help="Score (out of 10) to auto-approve. [default: from settings, fallback 9.0]")
 @click.option("--budget", default=None, type=float, help="Per-call budget in USD (0=unlimited). [default: from settings]")
 @click.option("--brainstorm", is_flag=True, default=False, help="Run multi-persona brainstorm before planning.")
+@click.option("--brainstorm-personas", default=None, type=str,
+              help="Comma-separated persona names for brainstorm (e.g., 'architect,pragmatist,qa-strategist'). "
+                   "Use 'all' for every persona. Run 'mad personas' to see available names.")
+@click.option("--brainstorm-rounds", default=3, type=int, help="Number of brainstorm rounds (min 2). [default: 3]")
 @_opt_model_all
 @_opt_planner_model
 @_opt_coder_model
 @_opt_reviewer_model
 def run(project_dir: str | None, idea: str | None, max_iterations: int | None, pass_score: float | None,
-        budget: float | None, brainstorm: bool,
+        budget: float | None, brainstorm: bool, brainstorm_personas: str | None, brainstorm_rounds: int,
         model_all: str | None, planner_model: str, coder_model: str, reviewer_model: str):
     """Run the full pipeline: plan -> code -> review <-> fix -> finalize.
 
     PROJECT_DIR and IDEA are optional if an active project is selected (mad select <name>).
     Use --brainstorm to run a multi-persona debate before planning.
     """
+    from mad.agents.brainstorm import resolve_personas
+
     pd, i, slug = _resolve_project_args(project_dir, idea)
     pm, cm, rm = _resolve_models(model_all, planner_model, coder_model, reviewer_model)
     cfg = _make_cfg(pd, i, max_iterations, planner_model=pm, coder_model=cm, reviewer_model=rm,
@@ -581,12 +630,19 @@ def run(project_dir: str | None, idea: str | None, max_iterations: int | None, p
     _init_git(cfg)
     _print_banner(cfg)
 
+    # Resolve brainstorm personas if specified
+    persona_names = [n.strip() for n in brainstorm_personas.split(",")] if brainstorm_personas else None
+    personas = resolve_personas(persona_names) if brainstorm else None
+
     reset_run_costs()
+    global _active_cfg
+    _active_cfg = cfg
     update_project_status(slug, "running")
     state = RunState()
     state.save(cfg)
 
-    _run_pipeline(cfg, state, brainstorm=brainstorm)
+    _run_pipeline(cfg, state, brainstorm=brainstorm, brainstorm_personas=personas,
+                  brainstorm_rounds=brainstorm_rounds)
     update_project_status(slug, "completed" if not state.finished else "completed")
 
 
@@ -728,38 +784,85 @@ def code(project_dir: str | None, idea: str | None, model_all: str | None, coder
 @cli.command()
 @click.argument("project_dir", required=False)
 @click.argument("idea", required=False)
-@click.option("-i", "--iteration", default=1, help="Iteration number for the review log.")
+@click.option("-i", "--iterations", default=1, help="Max review↔fix iterations to run.")
 @click.option("--pass-score", default=None, type=float, help="Score (out of 10) to auto-approve. [default: from settings, fallback 9.0]")
 @_opt_model_all
+@_opt_coder_model
 @_opt_reviewer_model
-def review(project_dir: str | None, idea: str | None, iteration: int, pass_score: float | None,
-           model_all: str | None, reviewer_model: str):
-    """Run only the reviewer on existing project code."""
-    from mad.agents import run_reviewer
+def review(project_dir: str | None, idea: str | None, iterations: int, pass_score: float | None,
+           model_all: str | None, coder_model: str, reviewer_model: str):
+    """Run the review↔fix loop on existing project code.
+
+    With -i 1 (default): runs a single review.
+    With -i N: runs up to N iterations of review → fix → review → ... until approved or max reached.
+    """
+    from mad.agents import run_coder, run_reviewer
+    from mad.summary import PhaseTimer
 
     pd, i, slug = _resolve_project_args(project_dir, idea)
-    _, _, rm = _resolve_models(model_all, None, None, reviewer_model)
-    cfg = _make_cfg(pd, i, reviewer_model=rm, pass_score=pass_score, project_slug=slug)
+    _, cm, rm = _resolve_models(model_all, None, coder_model, reviewer_model)
+    cfg = _make_cfg(pd, i, coder_model=cm, reviewer_model=rm, pass_score=pass_score, project_slug=slug)
     _print_banner(cfg)
 
     state = RunState.load(cfg.state_file) or RunState()
     state.save(cfg)
 
-    phase_banner(3, "REVIEW", "E2E testing & Evaluation")
+    # Find the highest existing review iteration so we continue numbering
+    existing = list(cfg.specs_dir.glob("review_iteration_*.md"))
+    start_iteration = 1
+    if existing:
+        import re as _re
+        nums = [int(m.group(1)) for f in existing if (m := _re.search(r"review_iteration_(\d+)\.md$", f.name))]
+        if nums:
+            start_iteration = max(nums) + 1
+    end_iteration = start_iteration + iterations
 
+    phase_banner(3, "REVIEW / FIX LOOP", f"Iterations {start_iteration}–{end_iteration - 1} (up to {iterations})")
+    reset_run_costs()
+    global _active_cfg
+    _active_cfg = cfg
+
+    approved = False
+    last_score_data = {}
+    iteration = start_iteration
     try:
-        approved, _score_data = run_reviewer(cfg, iteration=iteration)
-        state.mark(cfg, phase="review", iteration=iteration, approved=approved)
+        for iteration in range(start_iteration, end_iteration):
+            log_info(f"Review iteration {iteration} (run {iteration - start_iteration + 1} of {iterations})")
+            with PhaseTimer("review", cfg=cfg) as review_pt:
+                approved, last_score_data = run_reviewer(cfg, iteration=iteration)
+            score = last_score_data.get("overall_score")
+            review_pt.summary(
+                iteration=iteration,
+                score=score,
+                approved=approved,
+                issues_critical=last_score_data.get("critical_count", 0),
+                issues_major=last_score_data.get("major_count", 0),
+            )
+            state.mark(cfg, phase="review", iteration=iteration, approved=approved)
+
+            if approved:
+                break
+
+            if iteration < end_iteration - 1:
+                log_info(f"Running coder in fix mode (iteration {iteration})...")
+                with PhaseTimer("code_fix", cfg=cfg) as fix_pt:
+                    run_coder(cfg, mode="fix")
+                fix_pt.summary(outcome=f"Fix cycle {iteration} complete")
+                state.mark(cfg, phase="fix", iteration=iteration)
+            else:
+                log_warn(f"Max iterations ({iterations}) reached.")
     except (AgentLimitError, AgentError) as e:
-        # Save where we crashed so resume can re-run this review
-        state.mark(cfg, phase="code" if iteration == 1 else "fix", iteration=max(0, iteration - 1))
+        state.mark(cfg, phase="fix" if state.phase == "review" else "review",
+                   iteration=max(0, iteration - 1))
+        _print_token_summary()
         log_err(str(e))
         raise SystemExit(1)
 
     if approved:
-        console.print("[bold green]Project APPROVED.[/]")
+        console.print(f"[bold green]Project APPROVED at iteration {iteration}.[/]")
     else:
-        console.print(f"[bold yellow]Issues found.[/] See {cfg.refinement_file}")
+        console.print(f"[bold yellow]Issues remain after {iterations} iteration(s).[/] See {cfg.refinement_file}")
+    _print_token_summary()
 
 
 # ===========================================================================
@@ -788,15 +891,19 @@ def fix(project_dir: str | None, idea: str | None, model_all: str | None, coder_
     state.save(cfg)
 
     phase_banner(2, "FIX", "Addressing refinement list")
+    reset_run_costs()
+    global _active_cfg
+    _active_cfg = cfg
 
     try:
         run_coder(cfg, mode="fix")
         state.mark(cfg, phase="fix", iteration=state.iteration)
     except (AgentLimitError, AgentError) as e:
-        # Save where we crashed so resume can re-run this fix
         state.mark(cfg, phase="review", iteration=state.iteration, approved=False)
+        _print_token_summary()
         log_err(str(e))
         raise SystemExit(1)
+    _print_token_summary()
 
 
 # ===========================================================================
@@ -821,6 +928,9 @@ def finalize(project_dir: str | None, idea: str | None, model_all: str | None, r
     state.save(cfg)
 
     phase_banner(4, "FINALIZE", "README.md + Evolution learnings")
+    reset_run_costs()
+    global _active_cfg
+    _active_cfg = cfg
 
     try:
         run_finalizer(cfg)
@@ -829,8 +939,10 @@ def finalize(project_dir: str | None, idea: str | None, model_all: str | None, r
         state.mark(cfg, phase="evolution", finished=True)
     except (AgentLimitError, AgentError) as e:
         state.save(cfg)
+        _print_token_summary()
         log_err(str(e))
         raise SystemExit(1)
+    _print_token_summary()
 
 
 # ===========================================================================
@@ -1073,41 +1185,99 @@ def agents(agent_name: str | None):
 
 
 # ===========================================================================
-# mad costs — show cost breakdown
+# mad personas — list available brainstorm personas
 # ===========================================================================
 
 @cli.command()
-def costs():
-    """Show cost breakdown for the active project's last run."""
-    active = get_active_project()
-    slug = active["slug"] if active else ""
-    cfg = RunConfig(project_dir=Path("."), idea="", project_slug=slug)
-    costs_file = cfg.specs_dir / ".run_costs.json"
+def personas():
+    """List all available brainstorm personas.
 
-    rc = RunCosts.load(costs_file)
-    if not rc or not rc.calls:
-        log_info("No cost data found. Run a pipeline first.")
+    \b
+    Use persona names with --brainstorm-personas when running:
+      mad run ./dir "idea" --brainstorm --brainstorm-personas architect,qa-strategist
+      mad run ./dir "idea" --brainstorm --brainstorm-personas all
+    """
+    from mad.agents.brainstorm import DEFAULT_PERSONAS, PERSONA_REGISTRY
+
+    default_names = {p.name for p in DEFAULT_PERSONAS}
+
+    table = Table(title="Brainstorm Personas", show_lines=True)
+    table.add_column("Name", style="cyan", no_wrap=True)
+    table.add_column("Default", justify="center")
+    table.add_column("Expertise", style="dim")
+    table.add_column("Priorities")
+
+    for key in sorted(PERSONA_REGISTRY.keys()):
+        p = PERSONA_REGISTRY[key]
+        is_default = "[green]yes[/]" if p.name in default_names else "no"
+        table.add_row(key, is_default, p.expertise, p.priorities)
+
+    console.print(table)
+    console.print(f"\n[dim]Total: {len(PERSONA_REGISTRY)} personas ({len(DEFAULT_PERSONAS)} default)[/]")
+
+
+# ===========================================================================
+# mad tokens — show cumulative token usage per project
+# ===========================================================================
+
+@cli.command()
+@click.argument("project_slug", required=False)
+def tokens(project_slug: str | None):
+    """Show cumulative token usage for a project.
+
+    \b
+    Examples:
+      mad tokens               # Active project
+      mad tokens my-project    # Specific project
+    """
+    import json as _json
+
+    slug = project_slug
+    if not slug:
+        active = get_active_project()
+        if not active:
+            log_err("No active project. Pass a project slug or run 'mad select' first.")
+            raise SystemExit(1)
+        slug = active["slug"]
+
+    cfg = RunConfig(project_dir=Path("."), idea="", project_slug=slug)
+    path = _token_usage_file(cfg)
+
+    if not path.exists():
+        log_info(f"No token usage data for project '{slug}'.")
         return
 
-    table = Table(title=f"Cost Breakdown — Run {rc.run_id}")
-    table.add_column("Agent", style="bold")
-    table.add_column("Cost (USD)", justify="right", style="cyan")
-    table.add_column("Duration", justify="right", style="dim")
-    table.add_column("Turns", justify="right")
+    data = _json.loads(path.read_text(encoding="utf-8"))
+    total_in = data.get("input_tokens", 0)
+    total_out = data.get("output_tokens", 0)
+    runs = data.get("runs", [])
 
-    for c in rc.calls:
-        dur = f"{c.duration_ms / 1000:.1f}s" if c.duration_ms else "-"
-        cost = f"${c.cost_usd:.4f}" if c.cost_usd else "-"
-        table.add_row(c.role, cost, dur, str(c.num_turns) if c.num_turns else "-")
+    table = Table(title=f"Token Usage — {slug}")
+    table.add_column("Run", style="dim")
+    table.add_column("Input", justify="right", style="green")
+    table.add_column("Output", justify="right", style="yellow")
+    table.add_column("Total", justify="right", style="bold")
+    table.add_column("Timestamp", style="dim")
+
+    for r in runs:
+        r_in = r.get("input_tokens", 0)
+        r_out = r.get("output_tokens", 0)
+        table.add_row(
+            r.get("run_id", "?")[:12],
+            f"{r_in:,}", f"{r_out:,}", f"{r_in + r_out:,}",
+            r.get("timestamp", "")[:19],
+        )
 
     table.add_section()
     table.add_row(
         "[bold]TOTAL[/]",
-        f"[bold]${rc.total_cost_usd:.4f}[/]",
-        f"[bold]{rc.total_duration_ms / 1000:.1f}s[/]",
+        f"[bold]{total_in:,}[/]",
+        f"[bold]{total_out:,}[/]",
+        f"[bold]{total_in + total_out:,}[/]",
         "",
     )
     console.print(table)
+    console.print(f"\nTOKENS: input - {total_in:,} / output - {total_out:,}")
 
 
 # ===========================================================================

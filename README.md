@@ -22,7 +22,7 @@ You describe a project. MAD decomposes it into detailed tickets, researches offi
 │  PLANNER                                             │
 │  1. Pick tech stack, generate coding rules           │
 │  2. Domain research (if regulated/specialized)    ┐  │
-│  3. Tech documentation research (WebSearch)       ┘  │  ← parallel
+│  3. Tech documentation research (WebSearch)       ┘  │ 
 │  3.5. Spot-check research claims                     │
 │  4. Write detailed, ordered tickets                  │
 │     (uses brainstorm consensus if available)         │
@@ -337,16 +337,9 @@ multi-agent-dev/
 │       └── logs/                  # Agent logs (JSON + human-readable .md)
 │
 ├── evolution/                     # Cross-project (shared)
-│   ├── learnings.md               # Master learnings file (validated over time)
-│   ├── metrics.json               # Score history for trend analysis
-│   └── epoch_<run_id>.md          # Per-run analysis
-│
-└── webhook-icons/                 # Discord webhook agent icons (512x512)
-    ├── planner_icon.{png,svg}
-    ├── coder_icon.{png,svg}
-    ├── reviewer_icon.{png,svg}
-    ├── verifier_icon.{png,svg}
-    └── finalizer_icon.{png,svg}
+    ├── learnings.md               # Master learnings file (validated over time)
+    ├── metrics.json               # Score history for trend analysis
+    └── epoch_<run_id>.md          # Per-run analysis
 ```
 
 ## Brainstorm Mode
